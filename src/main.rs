@@ -13,16 +13,16 @@ fn main() -> Result<(), eframe::Error> {
     match cli.command {
         Some(Commands::Paths) => {
             let paths = DetectedPaths::detect();
-            println!("\n=== BABM - Chemins détectés ===");
+            println!("\n=== BABM - Detected Paths ===");
             if let Some(user) = paths.beamng_user_dir {
-                println!("Dossier utilisateur BeamNG : {}", user.display());
+                println!("BeamNG user folder: {}", user.display());
             } else {
-                println!("Dossier utilisateur BeamNG : non détecté");
+                println!("BeamNG user folder: not detected");
             }
 
-            println!("Dossiers de mods BeamNG :");
+            println!("BeamNG mod folders:");
             if paths.beamng_mods_dirs.is_empty() {
-                println!("  (aucun)");
+                println!("  (none)");
             } else {
                 for d in &paths.beamng_mods_dirs {
                     println!("  - {}", d.display());
@@ -30,10 +30,10 @@ fn main() -> Result<(), eframe::Error> {
             }
 
             if let Some(auto) = paths.automation_user_dir {
-                println!("Dossier utilisateur Automation : {}", auto.display());
+                println!("Automation user folder: {}", auto.display());
             }
             if let Some(exp) = paths.automation_exports_dir {
-                println!("Dossier exports Automation (.car) : {}", exp.display());
+                println!("Automation exports folder (.car): {}", exp.display());
             }
             println!();
             Ok(())
@@ -45,7 +45,7 @@ fn main() -> Result<(), eframe::Error> {
                 .or_else(|| paths.beamng_mods_dirs.first().cloned())
                 .unwrap_or_else(|| PathBuf::from("."));
 
-            println!("\nAnalyse du dossier : {}\n", target_dir.display());
+            println!("\nScanning folder: {}\n", target_dir.display());
             let mut vehicles = scanner::scan_directory(&target_dir);
 
             if automation_only {
@@ -53,18 +53,18 @@ fn main() -> Result<(), eframe::Error> {
             }
 
             if vehicles.is_empty() {
-                println!("Aucun véhicule trouvé.");
+                println!("No vehicles found.");
                 return Ok(());
             }
 
-            println!("{:<32} {:<24} {:<12} {:<10} {:<10}", "NOM DU VÉHICULE", "FICHIER", "PUISSANCE", "POIDS", "TYPE");
+            println!("{:<32} {:<24} {:<12} {:<10} {:<10}", "VEHICLE NAME", "FILE", "POWER", "WEIGHT", "TYPE");
             println!("{:-<95}", "");
 
             for v in &vehicles {
                 let main_cfg = v.main_config();
                 let power = main_cfg
                     .and_then(|c| c.power_hp)
-                    .map(|p| format!("{:.0} ch", p))
+                    .map(|p| format!("{:.0} hp", p))
                     .unwrap_or_else(|| "-".into());
                 let weight = main_cfg
                     .and_then(|c| c.weight_kg)
@@ -87,7 +87,7 @@ fn main() -> Result<(), eframe::Error> {
                 println!("{:<32} {:<24} {:<12} {:<10} {:<10}", short_name, short_file, power, weight, tag);
             }
 
-            println!("\nTotal : {} véhicule(s) trouvé(s).\n", vehicles.len());
+            println!("\nTotal: {} vehicle(s) found.\n", vehicles.len());
             Ok(())
         }
 
@@ -100,14 +100,14 @@ fn main() -> Result<(), eframe::Error> {
             let vehicles = scanner::scan_directory(&target_dir);
             let groups = Grouper::group_vehicles(&vehicles, &paths);
 
-            println!("\n=== Groupes de châssis détectés dans {} ===\n", target_dir.display());
+            println!("\n=== Detected Chassis Groups in {} ===\n", target_dir.display());
             for g in &groups {
-                println!("🚗 Châssis : {} ({} variante(s))", g.chassis_name, g.variants.len());
+                println!("🚗 Chassis: {} ({} variant(s))", g.chassis_name, g.variants.len());
                 for v in &g.variants {
                     let main_cfg = v.main_config();
                     let power = main_cfg
                         .and_then(|c| c.power_hp)
-                        .map(|p| format!("{:.0} ch", p))
+                        .map(|p| format!("{:.0} hp", p))
                         .unwrap_or_else(|| "-".into());
                     println!("    ├── {} [{}] (file: {})", v.display_name, power, v.file_name);
                 }
@@ -128,22 +128,22 @@ fn main() -> Result<(), eframe::Error> {
             let group = groups
                 .into_iter()
                 .find(|g| g.chassis_name.eq_ignore_ascii_case(&chassis) || g.chassis_slug.eq_ignore_ascii_case(&chassis))
-                .ok_or_else(|| format!("Châssis '{}' introuvable dans {}.", chassis, target_dir.display()));
+                .ok_or_else(|| format!("Chassis '{}' not found in {}.", chassis, target_dir.display()));
 
             match group {
                 Ok(g) => {
-                    println!("\nFusion des {} variantes pour le châssis '{}'...", g.variants.len(), g.chassis_name);
+                    println!("\nMerging {} variants for chassis '{}'...", g.variants.len(), g.chassis_name);
                     for v in &g.variants {
-                        println!("  + Inclusion de : {}", v.display_name);
+                        println!("  + Including: {}", v.display_name);
                     }
 
                     match Merger::merge_variants(&g.chassis_name, &g.variants, &target_dir) {
                         Ok(out) => {
-                            println!("\n✅ Succès ! Mod unifié créé : {}", out.display());
-                            println!("Les variantes séparées ont été archivées en toute sécurité dans .babm_backup/{} (réversible à 100%).\n", g.chassis_slug);
+                            println!("\n✅ Success! Unified mod created: {}", out.display());
+                            println!("Original variants safely backed up in .babm_backup/{} (100% reversible).\n", g.chassis_slug);
                         }
                         Err(e) => {
-                            eprintln!("\n❌ Erreur de fusion : {e}\n");
+                            eprintln!("\n❌ Merge error: {e}\n");
                         }
                     }
                 }
@@ -160,13 +160,13 @@ fn main() -> Result<(), eframe::Error> {
                 .or_else(|| paths.beamng_mods_dirs.first().cloned())
                 .unwrap_or_else(|| PathBuf::from("."));
 
-            println!("\nDéfusion du châssis '{}' dans {}...", chassis, target_dir.display());
+            println!("\nUnmerging chassis '{}' in {}...", chassis, target_dir.display());
             match Merger::unmerge_chassis(&chassis, &target_dir) {
                 Ok(()) => {
-                    println!("✅ Succès ! Le mod fusionné a été retiré et tous les fichiers originaux de variantes ont été restaurés.\n");
+                    println!("✅ Success! Merged mod removed and all original variant files restored.\n");
                 }
                 Err(e) => {
-                    eprintln!("❌ Erreur : {e}\n");
+                    eprintln!("❌ Error: {e}\n");
                 }
             }
             Ok(())
@@ -191,16 +191,16 @@ fn main() -> Result<(), eframe::Error> {
             };
 
             if !zip_to_isolate.is_file() {
-                eprintln!("Variante '{}' introuvable.", target);
+                eprintln!("Variant '{}' not found.", target);
                 return Ok(());
             }
 
             match Merger::isolate_variant_for_bess(&zip_to_isolate, &out_dir) {
                 Ok(path) => {
-                    println!("\n✅ Variante isolée prête pour BESS créée : {}\n", path.display());
+                    println!("\n✅ Isolated variant ready for BESS created: {}\n", path.display());
                 }
                 Err(e) => {
-                    eprintln!("❌ Erreur : {e}\n");
+                    eprintln!("❌ Error: {e}\n");
                 }
             }
             Ok(())
@@ -224,28 +224,28 @@ fn main() -> Result<(), eframe::Error> {
                         break;
                     }
                 }
-                found.ok_or_else(|| format!("Véhicule '{target}' introuvable."))
+                found.ok_or_else(|| format!("Vehicle '{target}' not found."))
             };
 
             match vehicle {
                 Ok(v) => {
-                    println!("\n=== Détails du véhicule : {} ===", v.display_name);
-                    println!("Nom interne : {}", v.internal_name);
-                    println!("Auteur      : {}", v.author);
-                    println!("Source      : {}", if v.is_automation { "Export Automation" } else { "Mod BeamNG" });
-                    println!("Fichier     : {}", v.file_path.display());
-                    println!("Taille      : {:.2} Mo", v.file_size_bytes as f64 / (1024.0 * 1024.0));
+                    println!("\n=== Vehicle Details: {} ===", v.display_name);
+                    println!("Internal name : {}", v.internal_name);
+                    println!("Author        : {}", v.author);
+                    println!("Source        : {}", if v.is_automation { "Automation Export" } else { "BeamNG Mod" });
+                    println!("File          : {}", v.file_path.display());
+                    println!("Size          : {:.2} MB", v.file_size_bytes as f64 / (1024.0 * 1024.0));
 
                     if let Some(ref eng) = v.engine {
-                        println!("\n[Moteur (Extraction JBeam)]");
+                        println!("\n[Engine (JBeam Extraction)]");
                         if let Some(cyl) = eng.cylinders {
-                            println!("  Cylindres   : {}", cyl);
+                            println!("  Cylinders    : {}", cyl);
                         }
                         if let Some(idle) = eng.idle_rpm {
-                            println!("  Ralenti     : {:.0} RPM", idle);
+                            println!("  Idle         : {:.0} RPM", idle);
                         }
                         if let Some(max) = eng.max_rpm {
-                            println!("  Régime max  : {:.0} RPM", max);
+                            println!("  Redline      : {:.0} RPM", max);
                         }
                     }
 
@@ -253,28 +253,28 @@ fn main() -> Result<(), eframe::Error> {
                     for cfg in &v.configs {
                         println!("  * {}", cfg.name);
                         if let Some(p) = cfg.power_hp {
-                            println!("    Puissance    : {:.0} ch", p);
+                            println!("    Power        : {:.0} hp", p);
                         }
                         if let Some(t) = cfg.torque_nm {
-                            println!("    Couple       : {:.0} Nm", t);
+                            println!("    Torque       : {:.0} Nm", t);
                         }
                         if let Some(w) = cfg.weight_kg {
-                            println!("    Poids        : {:.0} kg", w);
+                            println!("    Weight       : {:.0} kg", w);
                         }
                         if let Some(s) = cfg.top_speed_kmh {
-                            println!("    Vitesse max  : {:.0} km/h", s);
+                            println!("    Top speed    : {:.0} km/h", s);
                         }
                         if let Some(a) = cfg.accel_0_100 {
                             println!("    0-100 km/h   : {:.1} s", a);
                         }
                         if let Some(dt) = &cfg.drivetrain {
-                            println!("    Transmission : {}", dt);
+                            println!("    Drivetrain   : {}", dt);
                         }
                     }
                     println!();
                 }
                 Err(e) => {
-                    eprintln!("Erreur : {e}");
+                    eprintln!("Error: {e}");
                 }
             }
             Ok(())

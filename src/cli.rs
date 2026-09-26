@@ -10,63 +10,63 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Lance l'interface graphique egui (comportement par défaut)
+    /// Launch the graphical interface (default behavior)
     Gui,
 
-    /// Scanne les véhicules exportés et affiche un résumé
+    /// Scan exported vehicles and display a summary table
     Scan {
-        /// Dossier spécifique à scanner (sinon détection automatique)
+        /// Specific folder to scan (defaults to auto-detected BeamNG mods folder)
         #[arg(short, long)]
         path: Option<PathBuf>,
 
-        /// Filtrer uniquement les véhicules Automation
+        /// Filter only Automation vehicles
         #[arg(short, long)]
         automation_only: bool,
     },
 
-    /// Affiche les groupes de châssis et leurs variantes détectées
+    /// Display detected chassis groups and their variants
     Groups {
-        /// Dossier spécifique à scanner
+        /// Specific folder to scan
         #[arg(short, long)]
         path: Option<PathBuf>,
     },
 
-    /// Fusionne les variantes d'un châssis sous un mod BeamNG unique
+    /// Merge variants of a chassis into a single unified BeamNG mod
     Merge {
-        /// Nom du châssis (ex: "B5" ou "Volk Icarus")
+        /// Name of the chassis (e.g. "B5" or "Volk Icarus")
         chassis: String,
 
-        /// Dossier des mods
+        /// Mods folder
         #[arg(short, long)]
         path: Option<PathBuf>,
     },
 
-    /// Défusionne un châssis et restaure les fichiers de variantes originaux
+    /// Unmerge a chassis and restore original variant files
     Unmerge {
-        /// Nom du châssis à défusionner
+        /// Name of the chassis to unmerge
         chassis: String,
 
-        /// Dossier des mods
+        /// Mods folder
         #[arg(short, long)]
         path: Option<PathBuf>,
     },
 
-    /// Isole une variante pour l'utiliser dans BESS (Bunchy Engine Sound Synthesizer)
+    /// Isolate a variant into a standalone archive for BESS (Bunchy Engine Sound Synthesizer)
     Isolate {
-        /// Nom ou fichier de la variante
+        /// Variant name or zip filename
         target: String,
 
-        /// Dossier de sortie
+        /// Output directory
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
 
-    /// Affiche les détails complets d'un véhicule (chemin de zip ou nom)
+    /// Display full details of a vehicle (zip path or name)
     Info {
-        /// Chemin du fichier .zip ou nom du véhicule
+        /// Path to .zip file or vehicle name
         target: String,
     },
 
-    /// Affiche les répertoires détectés (BeamNG, Automation)
+    /// Display detected directories (BeamNG, Automation)
     Paths,
 }

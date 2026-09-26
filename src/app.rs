@@ -92,7 +92,7 @@ impl eframe::App for BabmApp {
                     self.running_chassis_tasks.remove(&slug);
                     let filename = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                     self.status_message = Some((
-                        format!("✅ Fusion réussie pour '{}' ! Fichier : {}", chassis_name, filename),
+                        format!("✅ Successfully merged '{}'! File: {}", chassis_name, filename),
                         false,
                     ));
                     should_reload = true;
@@ -100,13 +100,13 @@ impl eframe::App for BabmApp {
                 TaskResult::MergeError { chassis_name, error } => {
                     let slug = crate::grouper::slugify(&chassis_name);
                     self.running_chassis_tasks.remove(&slug);
-                    self.status_message = Some((format!("❌ Échec fusion pour '{}': {}", chassis_name, error), true));
+                    self.status_message = Some((format!("❌ Merge failed for '{}': {}", chassis_name, error), true));
                 }
                 TaskResult::UnmergeSuccess { chassis_name } => {
                     let slug = crate::grouper::slugify(&chassis_name);
                     self.running_chassis_tasks.remove(&slug);
                     self.status_message = Some((
-                        format!("✅ Châssis '{}' défusionné et variantes restaurées !", chassis_name),
+                        format!("✅ Chassis '{}' unmerged and original variants restored!", chassis_name),
                         false,
                     ));
                     should_reload = true;
@@ -114,16 +114,16 @@ impl eframe::App for BabmApp {
                 TaskResult::UnmergeError { chassis_name, error } => {
                     let slug = crate::grouper::slugify(&chassis_name);
                     self.running_chassis_tasks.remove(&slug);
-                    self.status_message = Some((format!("❌ Échec défusion pour '{}': {}", chassis_name, error), true));
+                    self.status_message = Some((format!("❌ Unmerge failed for '{}': {}", chassis_name, error), true));
                 }
                 TaskResult::IsolateSuccess { path } => {
                     self.status_message = Some((
-                        format!("✅ Variante isolée prête pour BESS : {}", path.display()),
+                        format!("✅ Isolated variant ready for BESS: {}", path.display()),
                         false,
                     ));
                 }
                 TaskResult::IsolateError { error } => {
-                    self.status_message = Some((format!("❌ Échec isolation : {}", error), true));
+                    self.status_message = Some((format!("❌ Isolation failed: {}", error), true));
                 }
             }
         }
@@ -146,20 +146,20 @@ impl eframe::App for BabmApp {
                 ui.label(RichText::new("— Bunchy's Automation BeamNG Management").italics().color(Color32::LIGHT_GRAY));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("📁 Choisir dossier...").clicked() {
+                    if ui.button("📁 Browse folder...").clicked() {
                         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                             self.load_directory(folder);
                         }
                     }
 
-                    if ui.button("🔄 Rafraîchir").clicked() {
+                    if ui.button("🔄 Refresh").clicked() {
                         if let Some(dir) = self.active_dir.clone() {
                             self.load_directory(dir);
                         }
                     }
 
                     if let Some(ref dir) = self.active_dir {
-                        if ui.button("📂 Ouvrir dossier").clicked() {
+                        if ui.button("📂 Open folder").clicked() {
                             let _ = std::process::Command::new("explorer").arg(dir).spawn();
                         }
                     }
@@ -174,9 +174,9 @@ impl eframe::App for BabmApp {
                         .active_dir
                         .as_ref()
                         .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "Sélectionner un dossier...".to_string());
+                        .unwrap_or_else(|| "Select a folder...".to_string());
 
-                    egui::ComboBox::from_label("Dossier actif")
+                    egui::ComboBox::from_label("Active folder")
                         .selected_text(selected_name)
                         .show_ui(ui, |ui| {
                             for path in &self.paths.beamng_mods_dirs {
@@ -192,8 +192,8 @@ impl eframe::App for BabmApp {
                         .active_dir
                         .as_ref()
                         .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "Aucun dossier sélectionné".to_string());
-                    ui.label(RichText::new(format!("Dossier actif : {current_dir_text}")).small().color(Color32::GRAY));
+                        .unwrap_or_else(|| "No folder selected".to_string());
+                    ui.label(RichText::new(format!("Active folder: {current_dir_text}")).small().color(Color32::GRAY));
                 }
 
                 if let Some(dir) = dir_to_load {
@@ -205,11 +205,11 @@ impl eframe::App for BabmApp {
                         ui.spinner();
                         ui.colored_label(
                             Color32::from_rgb(255, 170, 0),
-                            format!("⚡ {} tâche(s) en arrière-plan...", self.running_chassis_tasks.len()),
+                            format!("⚡ {} background task(s)...", self.running_chassis_tasks.len()),
                         );
                         ui.separator();
                     }
-                    ui.label(RichText::new(format!("{} châssis | {} mods détectés", self.groups.len(), self.vehicles.len())).strong());
+                    ui.label(RichText::new(format!("{} chassis | {} mods detected", self.groups.len(), self.vehicles.len())).strong());
                 });
             });
 
@@ -217,15 +217,15 @@ impl eframe::App for BabmApp {
 
             // Navigation tabs & search
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.active_tab, AppTab::Chassis, "🏎 Vue Châssis (Fusion / Défusion)");
-                ui.selectable_value(&mut self.active_tab, AppTab::Vehicles, "📋 Tous les Véhicules");
+                ui.selectable_value(&mut self.active_tab, AppTab::Chassis, "🏎 Chassis View (Merge / Unmerge)");
+                ui.selectable_value(&mut self.active_tab, AppTab::Vehicles, "📋 All Vehicles");
 
                 ui.separator();
 
-                ui.label("🔍 Rechercher :");
+                ui.label("🔍 Search:");
                 ui.text_edit_singleline(&mut self.filter_search);
 
-                ui.checkbox(&mut self.filter_automation_only, "Automation uniquement");
+                ui.checkbox(&mut self.filter_automation_only, "Automation only");
 
                 if !self.filter_search.is_empty() && ui.button("✖").clicked() {
                     self.filter_search.clear();
@@ -273,12 +273,12 @@ impl BabmApp {
             .default_width(330.0)
             .width_range(240.0..=480.0)
             .show(ctx, |ui| {
-                ui.heading(RichText::new("Châssis & Familles").size(16.0));
+                ui.heading(RichText::new("Chassis & Families").size(16.0));
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if filtered_indices.is_empty() {
-                        ui.label(RichText::new("Aucun châssis trouvé.").italics());
+                        ui.label(RichText::new("No chassis found.").italics());
                     }
 
                     for &idx in &filtered_indices {
@@ -299,7 +299,7 @@ impl BabmApp {
                             icon,
                             g.chassis_name,
                             g.variants.len(),
-                            if is_running { " [en cours...]" } else { "" }
+                            if is_running { " [in progress...]" } else { "" }
                         );
 
                         if ui.selectable_label(is_selected, label).clicked() {
@@ -318,28 +318,28 @@ impl BabmApp {
                         ui.horizontal(|ui| {
                             ui.heading(RichText::new(&g.chassis_name).strong().size(22.0));
                             if is_running {
-                                ui.colored_label(Color32::from_rgb(255, 170, 0), "⏳ Traitement en arrière-plan...");
+                                ui.colored_label(Color32::from_rgb(255, 170, 0), "⏳ Processing in background...");
                             } else if g.is_merged {
-                                ui.colored_label(Color32::from_rgb(0, 200, 100), "✔ Mod Fusionné");
+                                ui.colored_label(Color32::from_rgb(0, 200, 100), "✔ Merged Mod");
                             } else {
-                                ui.colored_label(Color32::from_rgb(255, 170, 0), "Variantes séparées");
+                                ui.colored_label(Color32::from_rgb(255, 170, 0), "Separate variants");
                             }
                         });
 
-                        ui.label(format!("Slug BeamNG : vehicles/{}/", g.chassis_slug));
+                        ui.label(format!("BeamNG Slug: vehicles/{}/", g.chassis_slug));
 
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             if let Some(ref mods_dir) = self.active_dir {
                                 if is_running {
                                     ui.spinner();
-                                    ui.label(RichText::new("Fusion / Opération en cours dans un thread séparé...").color(Color32::from_rgb(255, 170, 0)).italics());
+                                    ui.label(RichText::new("Merge / Operation in progress in background thread...").color(Color32::from_rgb(255, 170, 0)).italics());
                                 } else if !g.is_merged {
-                                    let btn = ui.button(RichText::new("⚡ Fusionner les variantes en 1 véhicule BeamNG").strong().color(Color32::WHITE));
+                                    let btn = ui.button(RichText::new("⚡ Merge variants into 1 BeamNG vehicle").strong().color(Color32::WHITE));
                                     if btn.clicked() {
                                         let slug = g.chassis_slug.clone();
                                         self.running_chassis_tasks.insert(slug);
-                                        self.status_message = Some((format!("⏳ Fusion de '{}' lancée en tâche de fond...", g.chassis_name), false));
+                                        self.status_message = Some((format!("⏳ Merging '{}' in background...", g.chassis_name), false));
 
                                         let tx = self.task_tx.clone();
                                         let c_name = g.chassis_name.clone();
@@ -358,11 +358,11 @@ impl BabmApp {
                                         });
                                     }
                                 } else {
-                                    let btn = ui.button(RichText::new("↩ Défusionner (Restaurer les originaux séparés)").color(Color32::LIGHT_RED));
+                                    let btn = ui.button(RichText::new("↩ Unmerge (Restore separate originals)").color(Color32::LIGHT_RED));
                                     if btn.clicked() {
                                         let slug = g.chassis_slug.clone();
                                         self.running_chassis_tasks.insert(slug);
-                                        self.status_message = Some((format!("⏳ Défusion de '{}' lancée en tâche de fond...", g.chassis_name), false));
+                                        self.status_message = Some((format!("⏳ Unmerging '{}' in background...", g.chassis_name), false));
 
                                         let tx = self.task_tx.clone();
                                         let c_name = g.chassis_name.clone();
@@ -384,7 +384,7 @@ impl BabmApp {
                         });
 
                         ui.separator();
-                        ui.heading(RichText::new(format!("Variantes incluses ({})", g.variants.len())).size(16.0));
+                        ui.heading(RichText::new(format!("Included variants ({})", g.variants.len())).size(16.0));
 
                         for v in &g.variants {
                             ui.group(|ui| {
@@ -393,12 +393,12 @@ impl BabmApp {
                                     ui.monospace(format!("({})", v.file_name));
 
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if ui.button("🎵 Isoler pour BESS").clicked() {
+                                        if ui.button("🎵 Isolate for BESS").clicked() {
                                             if let Some(ref dir) = self.active_dir {
                                                 let tx = self.task_tx.clone();
                                                 let v_path = v.file_path.clone();
                                                 let out_dir = dir.clone();
-                                                self.status_message = Some((format!("⏳ Isolation de '{}' en cours...", v.display_name), false));
+                                                self.status_message = Some((format!("⏳ Isolating '{}' in background...", v.display_name), false));
 
                                                 std::thread::spawn(move || {
                                                     match Merger::isolate_variant_for_bess(&v_path, &out_dir) {
@@ -418,7 +418,7 @@ impl BabmApp {
                                 if let Some(cfg) = v.main_config() {
                                     ui.horizontal(|ui| {
                                         if let Some(p) = cfg.power_hp {
-                                            ui.label(format!("⚡ {:.0} ch", p));
+                                            ui.label(format!("⚡ {:.0} hp", p));
                                         }
                                         if let Some(t) = cfg.torque_nm {
                                             ui.label(format!("| 🔧 {:.0} Nm", t));
@@ -442,7 +442,7 @@ impl BabmApp {
             } else {
                 ui.vertical_centered(|ui| {
                     ui.add_space(50.0);
-                    ui.label(RichText::new("Sélectionnez un châssis pour gérer ses variantes").italics());
+                    ui.label(RichText::new("Select a chassis to manage its variants").italics());
                 });
             }
         });
@@ -476,12 +476,12 @@ impl BabmApp {
             .default_width(320.0)
             .width_range(240.0..=480.0)
             .show(ctx, |ui| {
-                ui.heading(RichText::new("Véhicules").size(16.0));
+                ui.heading(RichText::new("Vehicles").size(16.0));
                 ui.separator();
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if filtered_indices.is_empty() {
-                        ui.label(RichText::new("Aucun véhicule trouvé.").italics());
+                        ui.label(RichText::new("No vehicles found.").italics());
                     }
 
                     for &idx in &filtered_indices {
@@ -520,8 +520,8 @@ impl BabmApp {
                             }
                         });
 
-                        ui.label(RichText::new(format!("Nom interne : {}", v.internal_name)).monospace().small());
-                        ui.label(RichText::new(format!("Auteur : {}", v.author)).small());
+                        ui.label(RichText::new(format!("Internal name: {}", v.internal_name)).monospace().small());
+                        ui.label(RichText::new(format!("Author: {}", v.author)).small());
 
                         ui.separator();
 
@@ -553,16 +553,16 @@ impl BabmApp {
                         // Engine specs
                         if let Some(ref engine) = v.engine {
                             ui.group(|ui| {
-                                ui.heading(RichText::new("⚙ Moteur (Extraction JBeam)").size(15.0));
+                                ui.heading(RichText::new("⚙ Engine (JBeam Extraction)").size(15.0));
                                 ui.horizontal(|ui| {
                                     if let Some(cyl) = engine.cylinders {
-                                        ui.label(format!("Cylindres : {cyl}"));
+                                        ui.label(format!("Cylinders: {cyl}"));
                                     }
                                     if let Some(idle) = engine.idle_rpm {
-                                        ui.label(format!("| Ralenti : {:.0} RPM", idle));
+                                        ui.label(format!("| Idle: {:.0} RPM", idle));
                                     }
                                     if let Some(max) = engine.max_rpm {
-                                        ui.label(format!("| Régime max : {:.0} RPM", max));
+                                        ui.label(format!("| Redline: {:.0} RPM", max));
                                     }
                                 });
                             });
@@ -585,39 +585,39 @@ impl BabmApp {
 
                                 ui.columns(3, |cols| {
                                     cols[0].label(format!(
-                                        "Puissance : {}",
+                                        "Power: {}",
                                         cfg.power_hp
-                                            .map(|p| format!("{:.0} ch", p))
+                                            .map(|p| format!("{:.0} hp", p))
                                             .unwrap_or_else(|| "N/A".into())
                                     ));
                                     cols[0].label(format!(
-                                        "Couple : {}",
+                                        "Torque: {}",
                                         cfg.torque_nm
                                             .map(|t| format!("{:.0} Nm", t))
                                             .unwrap_or_else(|| "N/A".into())
                                     ));
 
                                     cols[1].label(format!(
-                                        "Poids : {}",
+                                        "Weight: {}",
                                         cfg.weight_kg
                                             .map(|w| format!("{:.0} kg", w))
                                             .unwrap_or_else(|| "N/A".into())
                                     ));
                                     cols[1].label(format!(
-                                        "0-100 km/h : {}",
+                                        "0-100 km/h: {}",
                                         cfg.accel_0_100
                                             .map(|a| format!("{:.1} s", a))
                                             .unwrap_or_else(|| "N/A".into())
                                     ));
 
                                     cols[2].label(format!(
-                                        "Vitesse max : {}",
+                                        "Top speed: {}",
                                         cfg.top_speed_kmh
                                             .map(|s| format!("{:.0} km/h", s))
                                             .unwrap_or_else(|| "N/A".into())
                                     ));
                                     cols[2].label(format!(
-                                        "Carburant : {}",
+                                        "Fuel: {}",
                                         cfg.fuel_type.as_deref().unwrap_or("N/A")
                                     ));
                                 });
@@ -627,11 +627,11 @@ impl BabmApp {
 
                         ui.separator();
                         // File details
-                        ui.label(RichText::new("Fichier mod :").strong());
+                        ui.label(RichText::new("Mod file:").strong());
                         ui.label(RichText::new(v.file_path.display().to_string()).monospace().small());
                         ui.horizontal(|ui| {
-                            ui.label(format!("Taille : {:.2} Mo", v.file_size_bytes as f64 / (1024.0 * 1024.0)));
-                            if ui.button("Explorer le fichier").clicked() {
+                            ui.label(format!("Size: {:.2} MB", v.file_size_bytes as f64 / (1024.0 * 1024.0)));
+                            if ui.button("Show in Explorer").clicked() {
                                 let _ = std::process::Command::new("explorer")
                                     .arg(format!("/select,{}", v.file_path.display()))
                                     .spawn();
@@ -642,7 +642,7 @@ impl BabmApp {
             } else {
                 ui.vertical_centered(|ui| {
                     ui.add_space(50.0);
-                    ui.label(RichText::new("Sélectionnez un véhicule dans la liste pour voir ses détails").italics());
+                    ui.label(RichText::new("Select a vehicle from the list to view its details").italics());
                 });
             }
         });

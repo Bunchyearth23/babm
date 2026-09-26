@@ -35,7 +35,7 @@ impl Merger {
         mods_dir: &Path,
     ) -> Result<PathBuf, String> {
         if variants.is_empty() {
-            return Err("Aucune variante sélectionnée pour la fusion.".into());
+            return Err("No variants selected for merging.".into());
         }
 
         let chassis_slug = slugify(chassis_name);
@@ -43,14 +43,14 @@ impl Merger {
         let output_path = mods_dir.join(&output_filename);
 
         let backup_dir = mods_dir.join(".babm_backup").join(&chassis_slug);
-        fs::create_dir_all(&backup_dir).map_err(|e| format!("Erreur création dossier backup: {e}"))?;
+        fs::create_dir_all(&backup_dir).map_err(|e| format!("Error creating backup directory: {e}"))?;
 
         // 1. Collect and backup original files
         let mut original_backups = Vec::new();
         for v in variants {
             let backup_dest = backup_dir.join(&v.file_name);
             fs::copy(&v.file_path, &backup_dest)
-                .map_err(|e| format!("Erreur backup de {}: {e}", v.file_name))?;
+                .map_err(|e| format!("Error backing up {}: {e}", v.file_name))?;
 
             original_backups.push(OriginalFileBackup {
                 original_filename: v.file_name.clone(),
@@ -271,7 +271,7 @@ impl Merger {
             .write_all(core_jbeam.as_bytes())
             .map_err(|e| e.to_string())?;
 
-        zip_writer.finish().map_err(|e| format!("Erreur finalisation ZIP: {e}"))?;
+        zip_writer.finish().map_err(|e| format!("Error finalizing ZIP: {e}"))?;
 
         // 5. Write Manifest
         let manifest = MergeManifest {
@@ -302,18 +302,18 @@ impl Merger {
         let manifest_path = backup_dir.join("manifest.json");
 
         if !manifest_path.is_file() {
-            return Err(format!("Aucun manifest de fusion trouvé pour {}", chassis_name));
+            return Err(format!("No merge manifest found for {}", chassis_name));
         }
 
         let manifest_data = fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?;
         let manifest: MergeManifest = serde_json::from_str(&manifest_data)
-            .map_err(|e| format!("Manifeste corrompu: {e}"))?;
+            .map_err(|e| format!("Corrupted manifest: {e}"))?;
 
         // 1. Remove merged zip
         let merged_zip_path = mods_dir.join(&manifest.merged_mod_file);
         if merged_zip_path.is_file() {
             fs::remove_file(&merged_zip_path)
-                .map_err(|e| format!("Impossible de supprimer {}: {e}", merged_zip_path.display()))?;
+                .map_err(|e| format!("Cannot remove {}: {e}", merged_zip_path.display()))?;
         }
 
         // 2. Restore original files
@@ -343,7 +343,7 @@ impl Merger {
     ) -> Result<PathBuf, String> {
         // If variant_zip is already an original variant zip, verify it works for BESS
         if !variant_zip.is_file() {
-            return Err("Fichier introuvable".into());
+            return Err("File not found".into());
         }
         let out_file = output_dir.join(format!("bess_ready_{}", variant_zip.file_name().unwrap().to_string_lossy()));
         fs::copy(variant_zip, &out_file).map_err(|e| e.to_string())?;
