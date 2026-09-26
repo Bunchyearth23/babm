@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Publish Release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Release binary
+        run: cargo build --release
+
+      - name: Prepare binary
+        run: Copy-Item "target/release/babm.exe" -Destination "BABM.exe"
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: BABM.exe
+          name: BABM ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
