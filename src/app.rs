@@ -4,13 +4,24 @@ use crate::paths::DetectedPaths;
 use crate::scanner;
 use crate::vehicle::VehicleMod;
 use eframe::egui::{self, Color32, RichText, TextureHandle};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum AppTab {
     Chassis,
     Vehicles,
+}
+
+pub enum TaskResult {
+    MergeSuccess { chassis_name: String, path: PathBuf },
+    MergeError { chassis_name: String, error: String },
+    UnmergeSuccess { chassis_name: String },
+    UnmergeError { chassis_name: String, error: String },
+    IsolateSuccess { path: PathBuf },
+    IsolateError { error: String },
 }
 
 pub struct BabmApp {
@@ -25,12 +36,17 @@ pub struct BabmApp {
     textures: HashMap<PathBuf, TextureHandle>,
     active_tab: AppTab,
     status_message: Option<(String, bool)>, // (message, is_error)
+    task_tx: Sender<TaskResult>,
+    task_rx: Receiver<TaskResult>,
+    running_chassis_tasks: HashSet<String>,
 }
 
 impl BabmApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let paths = DetectedPaths::detect();
         let default_dir = paths.beamng_mods_dirs.first().cloned();
+        let (task_tx, task_rx) = mpsc::channel();
+
         let mut app = Self {
             paths,
             active_dir: default_dir.clone(),
@@ -43,6 +59,9 @@ impl BabmApp {
             textures: HashMap::new(),
             active_tab: AppTab::Chassis,
             status_message: None,
+            task_tx,
+            task_rx,
+            running_chassis_tasks: HashSet::new(),
         };
 
         if let Some(ref dir) = default_dir {
@@ -64,6 +83,62 @@ impl BabmApp {
 
 impl eframe::App for BabmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll background task results
+        let mut should_reload = false;
+        while let Ok(msg) = self.task_rx.try_recv() {
+            match msg {
+                TaskResult::MergeSuccess { chassis_name, path } => {
+                    let slug = crate::grouper::slugify(&chassis_name);
+                    self.running_chassis_tasks.remove(&slug);
+                    let filename = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    self.status_message = Some((
+                        format!("✅ Fusion réussie pour '{}' ! Fichier : {}", chassis_name, filename),
+                        false,
+                    ));
+                    should_reload = true;
+                }
+                TaskResult::MergeError { chassis_name, error } => {
+                    let slug = crate::grouper::slugify(&chassis_name);
+                    self.running_chassis_tasks.remove(&slug);
+                    self.status_message = Some((format!("❌ Échec fusion pour '{}': {}", chassis_name, error), true));
+                }
+                TaskResult::UnmergeSuccess { chassis_name } => {
+                    let slug = crate::grouper::slugify(&chassis_name);
+                    self.running_chassis_tasks.remove(&slug);
+                    self.status_message = Some((
+                        format!("✅ Châssis '{}' défusionné et variantes restaurées !", chassis_name),
+                        false,
+                    ));
+                    should_reload = true;
+                }
+                TaskResult::UnmergeError { chassis_name, error } => {
+                    let slug = crate::grouper::slugify(&chassis_name);
+                    self.running_chassis_tasks.remove(&slug);
+                    self.status_message = Some((format!("❌ Échec défusion pour '{}': {}", chassis_name, error), true));
+                }
+                TaskResult::IsolateSuccess { path } => {
+                    self.status_message = Some((
+                        format!("✅ Variante isolée prête pour BESS : {}", path.display()),
+                        false,
+                    ));
+                }
+                TaskResult::IsolateError { error } => {
+                    self.status_message = Some((format!("❌ Échec isolation : {}", error), true));
+                }
+            }
+        }
+
+        if should_reload {
+            if let Some(ref dir) = self.active_dir.clone() {
+                self.load_directory(dir.clone());
+            }
+        }
+
+        // Request repaint while tasks are running for smooth spinner animation and polling
+        if !self.running_chassis_tasks.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(60));
+        }
+
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -126,6 +201,14 @@ impl eframe::App for BabmApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if !self.running_chassis_tasks.is_empty() {
+                        ui.spinner();
+                        ui.colored_label(
+                            Color32::from_rgb(255, 170, 0),
+                            format!("⚡ {} tâche(s) en arrière-plan...", self.running_chassis_tasks.len()),
+                        );
+                        ui.separator();
+                    }
                     ui.label(RichText::new(format!("{} châssis | {} mods détectés", self.groups.len(), self.vehicles.len())).strong());
                 });
             });
@@ -187,8 +270,8 @@ impl BabmApp {
             .collect();
 
         egui::SidePanel::left("chassis_list_panel")
-            .default_width(320.0)
-            .width_range(240.0..=450.0)
+            .default_width(330.0)
+            .width_range(240.0..=480.0)
             .show(ctx, |ui| {
                 ui.heading(RichText::new("Châssis & Familles").size(16.0));
                 ui.separator();
@@ -201,12 +284,22 @@ impl BabmApp {
                     for &idx in &filtered_indices {
                         let g = &self.groups[idx];
                         let is_selected = self.selected_chassis_index == Some(idx);
+                        let is_running = self.running_chassis_tasks.contains(&g.chassis_slug);
+
+                        let icon = if is_running {
+                            "⏳"
+                        } else if g.is_merged {
+                            "📦"
+                        } else {
+                            "🚗"
+                        };
 
                         let label = format!(
-                            "{} {} ({} variantes)",
-                            if g.is_merged { "📦" } else { "🚗" },
+                            "{} {} ({} var.){}",
+                            icon,
                             g.chassis_name,
-                            g.variants.len()
+                            g.variants.len(),
+                            if is_running { " [en cours...]" } else { "" }
                         );
 
                         if ui.selectable_label(is_selected, label).clicked() {
@@ -219,10 +312,14 @@ impl BabmApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(idx) = self.selected_chassis_index {
                 if let Some(g) = self.groups.get(idx).cloned() {
+                    let is_running = self.running_chassis_tasks.contains(&g.chassis_slug);
+
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.heading(RichText::new(&g.chassis_name).strong().size(22.0));
-                            if g.is_merged {
+                            if is_running {
+                                ui.colored_label(Color32::from_rgb(255, 170, 0), "⏳ Traitement en arrière-plan...");
+                            } else if g.is_merged {
                                 ui.colored_label(Color32::from_rgb(0, 200, 100), "✔ Mod Fusionné");
                             } else {
                                 ui.colored_label(Color32::from_rgb(255, 170, 0), "Variantes séparées");
@@ -234,29 +331,53 @@ impl BabmApp {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             if let Some(ref mods_dir) = self.active_dir {
-                                if !g.is_merged {
-                                    if ui.button(RichText::new("⚡ Fusionner les variantes en 1 véhicule BeamNG").strong().color(Color32::WHITE)).clicked() {
-                                        match Merger::merge_variants(&g.chassis_name, &g.variants, mods_dir) {
-                                            Ok(out) => {
-                                                self.status_message = Some((format!("✅ Fusion réussie ! Créé : {}", out.file_name().unwrap().to_string_lossy()), false));
-                                                self.load_directory(mods_dir.clone());
+                                if is_running {
+                                    ui.spinner();
+                                    ui.label(RichText::new("Fusion / Opération en cours dans un thread séparé...").color(Color32::from_rgb(255, 170, 0)).italics());
+                                } else if !g.is_merged {
+                                    let btn = ui.button(RichText::new("⚡ Fusionner les variantes en 1 véhicule BeamNG").strong().color(Color32::WHITE));
+                                    if btn.clicked() {
+                                        let slug = g.chassis_slug.clone();
+                                        self.running_chassis_tasks.insert(slug);
+                                        self.status_message = Some((format!("⏳ Fusion de '{}' lancée en tâche de fond...", g.chassis_name), false));
+
+                                        let tx = self.task_tx.clone();
+                                        let c_name = g.chassis_name.clone();
+                                        let c_vars = g.variants.clone();
+                                        let m_dir = mods_dir.clone();
+
+                                        std::thread::spawn(move || {
+                                            match Merger::merge_variants(&c_name, &c_vars, &m_dir) {
+                                                Ok(path) => {
+                                                    let _ = tx.send(TaskResult::MergeSuccess { chassis_name: c_name, path });
+                                                }
+                                                Err(error) => {
+                                                    let _ = tx.send(TaskResult::MergeError { chassis_name: c_name, error });
+                                                }
                                             }
-                                            Err(e) => {
-                                                self.status_message = Some((format!("❌ Échec de la fusion : {e}"), true));
-                                            }
-                                        }
+                                        });
                                     }
                                 } else {
-                                    if ui.button(RichText::new("↩ Défusionner (Restaurer les originaux séparés)").color(Color32::LIGHT_RED)).clicked() {
-                                        match Merger::unmerge_chassis(&g.chassis_name, mods_dir) {
-                                            Ok(()) => {
-                                                self.status_message = Some((format!("✅ Châssis {} défusionné et variantes restaurées !", g.chassis_name), false));
-                                                self.load_directory(mods_dir.clone());
+                                    let btn = ui.button(RichText::new("↩ Défusionner (Restaurer les originaux séparés)").color(Color32::LIGHT_RED));
+                                    if btn.clicked() {
+                                        let slug = g.chassis_slug.clone();
+                                        self.running_chassis_tasks.insert(slug);
+                                        self.status_message = Some((format!("⏳ Défusion de '{}' lancée en tâche de fond...", g.chassis_name), false));
+
+                                        let tx = self.task_tx.clone();
+                                        let c_name = g.chassis_name.clone();
+                                        let m_dir = mods_dir.clone();
+
+                                        std::thread::spawn(move || {
+                                            match Merger::unmerge_chassis(&c_name, &m_dir) {
+                                                Ok(()) => {
+                                                    let _ = tx.send(TaskResult::UnmergeSuccess { chassis_name: c_name });
+                                                }
+                                                Err(error) => {
+                                                    let _ = tx.send(TaskResult::UnmergeError { chassis_name: c_name, error });
+                                                }
                                             }
-                                            Err(e) => {
-                                                self.status_message = Some((format!("❌ Échec de la défusion : {e}"), true));
-                                            }
-                                        }
+                                        });
                                     }
                                 }
                             }
@@ -274,14 +395,21 @@ impl BabmApp {
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         if ui.button("🎵 Isoler pour BESS").clicked() {
                                             if let Some(ref dir) = self.active_dir {
-                                                match Merger::isolate_variant_for_bess(&v.file_path, dir) {
-                                                    Ok(out) => {
-                                                        self.status_message = Some((format!("✅ Variante isolée prête pour BESS : {}", out.display()), false));
+                                                let tx = self.task_tx.clone();
+                                                let v_path = v.file_path.clone();
+                                                let out_dir = dir.clone();
+                                                self.status_message = Some((format!("⏳ Isolation de '{}' en cours...", v.display_name), false));
+
+                                                std::thread::spawn(move || {
+                                                    match Merger::isolate_variant_for_bess(&v_path, &out_dir) {
+                                                        Ok(path) => {
+                                                            let _ = tx.send(TaskResult::IsolateSuccess { path });
+                                                        }
+                                                        Err(error) => {
+                                                            let _ = tx.send(TaskResult::IsolateError { error });
+                                                        }
                                                     }
-                                                    Err(e) => {
-                                                        self.status_message = Some((format!("❌ Erreur isolation : {e}"), true));
-                                                    }
-                                                }
+                                                });
                                             }
                                         }
                                     });
