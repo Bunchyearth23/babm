@@ -108,7 +108,8 @@ fn load_automation_db_mapping(user_dir: &Path) -> Option<HashMap<String, String>
 }
 
 fn find_chassis_from_db(v: &VehicleMod, map: &HashMap<String, String>) -> Option<String> {
-    let lower_display = v.display_name.to_lowercase();
+    let clean = v.display_name.trim_end_matches(" [BESS]").trim_end_matches(" (BESS)");
+    let lower_display = clean.to_lowercase();
     if let Some(m) = map.get(&lower_display) {
         return Some(m.clone());
     }
@@ -132,8 +133,9 @@ fn find_chassis_from_db(v: &VehicleMod, map: &HashMap<String, String>) -> Option
 
 /// Fallback heuristic deduction of chassis name
 fn deduce_chassis_name(display_name: &str, internal_name: &str) -> String {
+    let clean_display = display_name.trim_end_matches(" [BESS]").trim_end_matches(" (BESS)");
     // If display name has multiple parts, e.g. "B5 A" -> "B5", "Volk Icarus II" -> "Volk Icarus"
-    let parts: Vec<&str> = display_name.split_whitespace().collect();
+    let parts: Vec<&str> = clean_display.split_whitespace().collect();
     if parts.len() > 1 {
         // If last part is single letter (A, C, GT, etc.) or Roman numeral
         let last = parts.last().copied().unwrap_or("");

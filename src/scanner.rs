@@ -21,6 +21,25 @@ pub fn scan_directory(dir: &Path) -> Vec<VehicleMod> {
         }
     }
 
+    // Build map of base vehicle display names (internal_name -> display_name)
+    let mut base_names = std::collections::HashMap::new();
+    for v in &vehicles {
+        if !v.file_name.starts_with("bess-variant-") {
+            base_names.insert(v.internal_name.clone(), v.display_name.clone());
+        }
+    }
+
+    // Second pass: refine display names for BESS variants to "<Base Name> [BESS]"
+    for v in &mut vehicles {
+        if v.file_name.starts_with("bess-variant-") {
+            if let Some(base_name) = base_names.get(&v.internal_name) {
+                v.display_name = format!("{} [BESS]", base_name);
+            } else if !v.display_name.ends_with("[BESS]") {
+                v.display_name = format!("{} [BESS]", pretty_title_from_slug(&v.internal_name));
+            }
+        }
+    }
+
     vehicles.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
     vehicles
 }
@@ -65,9 +84,10 @@ pub fn inspect_vehicle_zip(path: &Path) -> Result<VehicleMod, String> {
                 thumbnail_index = Some(i);
             }
 
-            if name.contains("/eng_")
+            if (name.contains("/eng_")
                 && basename.starts_with("camso_engine_")
-                && basename.ends_with(".jbeam")
+                && basename.ends_with(".jbeam"))
+                || (basename.starts_with("bess_engine_") && basename.ends_with(".jbeam"))
             {
                 engine_jbeam_index = Some(i);
             }
@@ -80,9 +100,12 @@ pub fn inspect_vehicle_zip(path: &Path) -> Result<VehicleMod, String> {
             .unwrap_or_default()
     });
 
+    let is_bess = file_name.starts_with("bess-variant-")
+        || config_indexes.iter().any(|(k, _)| k.starts_with("bess_"));
+
     let mut display_name = internal_name.clone();
-    let mut author = "Unknown".to_string();
-    let mut is_automation = false;
+    let mut author = if is_bess { "BESS / Automation".to_string() } else { "Unknown".to_string() };
+    let mut is_automation = is_bess;
     let mut default_config = None;
 
     if let Some(idx) = info_json_index {
@@ -104,6 +127,8 @@ pub fn inspect_vehicle_zip(path: &Path) -> Result<VehicleMod, String> {
                 }
             }
         }
+    } else if is_bess {
+        display_name = format!("{} [BESS]", pretty_title_from_slug(&internal_name));
     }
 
     // Parse configs
@@ -282,4 +307,27 @@ fn parse_numbers(text: &str, key: &str, out: &mut Vec<f32>) {
         matched = false;
         colon = false;
     }
+}
+
+pub fn pretty_title_from_slug(slug: &str) -> String {
+    slug.split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            if is_roman_numeral(w) || w.len() <= 2 {
+                w.to_uppercase()
+            } else {
+                let mut chars = w.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                }
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+fn is_roman_numeral(s: &str) -> bool {
+    let s = s.to_uppercase();
+    matches!(s.as_str(), "I" | "II" | "III" | "IV" | "V" | "VI" | "VII" | "VIII" | "IX" | "X")
 }
