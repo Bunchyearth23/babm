@@ -21,21 +21,41 @@ pub fn scan_directory(dir: &Path) -> Vec<VehicleMod> {
         }
     }
 
-    // Build map of base vehicle display names (internal_name -> display_name)
+    // Build map of base vehicle display names and engine specs (internal_name -> ...)
     let mut base_names = std::collections::HashMap::new();
+    let mut base_engines = std::collections::HashMap::new();
     for v in &vehicles {
         if !v.file_name.starts_with("bess-variant-") {
             base_names.insert(v.internal_name.clone(), v.display_name.clone());
+            if let Some(ref eng) = v.engine {
+                base_engines.insert(v.internal_name.clone(), eng.clone());
+            }
         }
     }
 
-    // Second pass: refine display names for BESS variants to "<Base Name> [BESS]"
+    // Second pass: refine display names and engine specs for BESS variants
     for v in &mut vehicles {
         if v.file_name.starts_with("bess-variant-") {
             if let Some(base_name) = base_names.get(&v.internal_name) {
                 v.display_name = format!("{} [BESS]", base_name);
             } else if !v.display_name.ends_with("[BESS]") {
                 v.display_name = format!("{} [BESS]", pretty_title_from_slug(&v.internal_name));
+            }
+
+            if let Some(base_eng) = base_engines.get(&v.internal_name) {
+                if let Some(ref mut eng) = v.engine {
+                    if eng.max_rpm.is_none() || eng.max_rpm == Some(12000.0) {
+                        eng.max_rpm = base_eng.max_rpm;
+                    }
+                    if eng.idle_rpm.is_none() {
+                        eng.idle_rpm = base_eng.idle_rpm;
+                    }
+                    if eng.cylinders.is_none() {
+                        eng.cylinders = base_eng.cylinders;
+                    }
+                } else {
+                    v.engine = Some(base_eng.clone());
+                }
             }
         }
     }
@@ -195,15 +215,26 @@ pub fn inspect_vehicle_zip(path: &Path) -> Result<VehicleMod, String> {
             let mut text = String::new();
             if entry.take(2_000_000).read_to_string(&mut text).is_ok() {
                 let mut idle = Vec::new();
+                let mut rev_limiter = Vec::new();
+                let mut shift_up = Vec::new();
                 let mut max = Vec::new();
                 let mut cyl = Vec::new();
                 parse_numbers(&text, "idleRPM", &mut idle);
+                parse_numbers(&text, "revLimiterRPM", &mut rev_limiter);
+                parse_numbers(&text, "highShiftUpRPM", &mut shift_up);
                 parse_numbers(&text, "maxRPM", &mut max);
                 parse_numbers(&text, "fundamentalFrequencyCylinderCount", &mut cyl);
 
+                let redline = rev_limiter
+                    .first()
+                    .copied()
+                    .or_else(|| shift_up.first().copied())
+                    .or_else(|| max.first().copied().filter(|&m| m < 11999.0))
+                    .or_else(|| max.first().copied());
+
                 engine = Some(EngineSpecs {
                     idle_rpm: idle.first().copied(),
-                    max_rpm: max.first().copied(),
+                    max_rpm: redline,
                     cylinders: cyl.first().map(|c| *c as u32),
                 });
             }
