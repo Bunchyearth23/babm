@@ -24,6 +24,43 @@ pub enum Commands {
         automation_only: bool,
     },
 
+    /// Affiche les groupes de châssis et leurs variantes détectées
+    Groups {
+        /// Dossier spécifique à scanner
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+    },
+
+    /// Fusionne les variantes d'un châssis sous un mod BeamNG unique
+    Merge {
+        /// Nom du châssis (ex: "B5" ou "Volk Icarus")
+        chassis: String,
+
+        /// Dossier des mods
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+    },
+
+    /// Défusionne un châssis et restaure les fichiers de variantes originaux
+    Unmerge {
+        /// Nom du châssis à défusionner
+        chassis: String,
+
+        /// Dossier des mods
+        #[arg(short, long)]
+        path: Option<PathBuf>,
+    },
+
+    /// Isole une variante pour l'utiliser dans BESS (Bunchy Engine Sound Synthesizer)
+    Isolate {
+        /// Nom ou fichier de la variante
+        target: String,
+
+        /// Dossier de sortie
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
+
     /// Affiche les détails complets d'un véhicule (chemin de zip ou nom)
     Info {
         /// Chemin du fichier .zip ou nom du véhicule

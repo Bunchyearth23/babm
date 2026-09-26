@@ -1,3 +1,5 @@
+use crate::grouper::{ChassisGroup, Grouper};
+use crate::merger::Merger;
 use crate::paths::DetectedPaths;
 use crate::scanner;
 use crate::vehicle::VehicleMod;
@@ -5,14 +7,24 @@ use eframe::egui::{self, Color32, RichText, TextureHandle};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum AppTab {
+    Chassis,
+    Vehicles,
+}
+
 pub struct BabmApp {
     paths: DetectedPaths,
     active_dir: Option<PathBuf>,
     vehicles: Vec<VehicleMod>,
+    groups: Vec<ChassisGroup>,
     selected_index: Option<usize>,
+    selected_chassis_index: Option<usize>,
     filter_search: String,
     filter_automation_only: bool,
     textures: HashMap<PathBuf, TextureHandle>,
+    active_tab: AppTab,
+    status_message: Option<(String, bool)>, // (message, is_error)
 }
 
 impl BabmApp {
@@ -23,10 +35,14 @@ impl BabmApp {
             paths,
             active_dir: default_dir.clone(),
             vehicles: Vec::new(),
+            groups: Vec::new(),
             selected_index: None,
+            selected_chassis_index: None,
             filter_search: String::new(),
             filter_automation_only: false,
             textures: HashMap::new(),
+            active_tab: AppTab::Chassis,
+            status_message: None,
         };
 
         if let Some(ref dir) = default_dir {
@@ -39,7 +55,9 @@ impl BabmApp {
     pub fn load_directory(&mut self, dir: PathBuf) {
         self.active_dir = Some(dir.clone());
         self.vehicles = scanner::scan_directory(&dir);
+        self.groups = Grouper::group_vehicles(&self.vehicles, &self.paths);
         self.selected_index = if self.vehicles.is_empty() { None } else { Some(0) };
+        self.selected_chassis_index = if self.groups.is_empty() { None } else { Some(0) };
         self.textures.clear();
     }
 }
@@ -108,14 +126,19 @@ impl eframe::App for BabmApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("{} véhicule(s) détecté(s)", self.vehicles.len())).strong());
+                    ui.label(RichText::new(format!("{} châssis | {} mods détectés", self.groups.len(), self.vehicles.len())).strong());
                 });
             });
 
             ui.separator();
 
-            // Search and filters
+            // Navigation tabs & search
             ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.active_tab, AppTab::Chassis, "🏎 Vue Châssis (Fusion / Défusion)");
+                ui.selectable_value(&mut self.active_tab, AppTab::Vehicles, "📋 Tous les Véhicules");
+
+                ui.separator();
+
                 ui.label("🔍 Rechercher :");
                 ui.text_edit_singleline(&mut self.filter_search);
 
@@ -125,10 +148,179 @@ impl eframe::App for BabmApp {
                     self.filter_search.clear();
                 }
             });
+
+            // Status message banner
+            if let Some((ref msg, is_err)) = self.status_message {
+                ui.add_space(4.0);
+                let col = if is_err { Color32::LIGHT_RED } else { Color32::LIGHT_GREEN };
+                ui.colored_label(col, msg);
+            }
+
             ui.add_space(4.0);
         });
 
-        // Main content: left vehicle list, right details panel
+        match self.active_tab {
+            AppTab::Chassis => self.render_chassis_tab(ctx),
+            AppTab::Vehicles => self.render_vehicles_tab(ctx),
+        }
+    }
+}
+
+impl BabmApp {
+    fn render_chassis_tab(&mut self, ctx: &egui::Context) {
+        let filtered_indices: Vec<usize> = self
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| {
+                if !self.filter_search.is_empty() {
+                    let search = self.filter_search.to_lowercase();
+                    let match_chassis = g.chassis_name.to_lowercase().contains(&search);
+                    let match_variant = g.variants.iter().any(|v| v.display_name.to_lowercase().contains(&search));
+                    if !(match_chassis || match_variant) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        egui::SidePanel::left("chassis_list_panel")
+            .default_width(320.0)
+            .width_range(240.0..=450.0)
+            .show(ctx, |ui| {
+                ui.heading(RichText::new("Châssis & Familles").size(16.0));
+                ui.separator();
+
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if filtered_indices.is_empty() {
+                        ui.label(RichText::new("Aucun châssis trouvé.").italics());
+                    }
+
+                    for &idx in &filtered_indices {
+                        let g = &self.groups[idx];
+                        let is_selected = self.selected_chassis_index == Some(idx);
+
+                        let label = format!(
+                            "{} {} ({} variantes)",
+                            if g.is_merged { "📦" } else { "🚗" },
+                            g.chassis_name,
+                            g.variants.len()
+                        );
+
+                        if ui.selectable_label(is_selected, label).clicked() {
+                            self.selected_chassis_index = Some(idx);
+                        }
+                    }
+                });
+            });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(idx) = self.selected_chassis_index {
+                if let Some(g) = self.groups.get(idx).cloned() {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.heading(RichText::new(&g.chassis_name).strong().size(22.0));
+                            if g.is_merged {
+                                ui.colored_label(Color32::from_rgb(0, 200, 100), "✔ Mod Fusionné");
+                            } else {
+                                ui.colored_label(Color32::from_rgb(255, 170, 0), "Variantes séparées");
+                            }
+                        });
+
+                        ui.label(format!("Slug BeamNG : vehicles/{}/", g.chassis_slug));
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if let Some(ref mods_dir) = self.active_dir {
+                                if !g.is_merged {
+                                    if ui.button(RichText::new("⚡ Fusionner les variantes en 1 véhicule BeamNG").strong().color(Color32::WHITE)).clicked() {
+                                        match Merger::merge_variants(&g.chassis_name, &g.variants, mods_dir) {
+                                            Ok(out) => {
+                                                self.status_message = Some((format!("✅ Fusion réussie ! Créé : {}", out.file_name().unwrap().to_string_lossy()), false));
+                                                self.load_directory(mods_dir.clone());
+                                            }
+                                            Err(e) => {
+                                                self.status_message = Some((format!("❌ Échec de la fusion : {e}"), true));
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    if ui.button(RichText::new("↩ Défusionner (Restaurer les originaux séparés)").color(Color32::LIGHT_RED)).clicked() {
+                                        match Merger::unmerge_chassis(&g.chassis_name, mods_dir) {
+                                            Ok(()) => {
+                                                self.status_message = Some((format!("✅ Châssis {} défusionné et variantes restaurées !", g.chassis_name), false));
+                                                self.load_directory(mods_dir.clone());
+                                            }
+                                            Err(e) => {
+                                                self.status_message = Some((format!("❌ Échec de la défusion : {e}"), true));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+
+                        ui.separator();
+                        ui.heading(RichText::new(format!("Variantes incluses ({})", g.variants.len())).size(16.0));
+
+                        for v in &g.variants {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(&v.display_name).strong().size(15.0));
+                                    ui.monospace(format!("({})", v.file_name));
+
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button("🎵 Isoler pour BESS").clicked() {
+                                            if let Some(ref dir) = self.active_dir {
+                                                match Merger::isolate_variant_for_bess(&v.file_path, dir) {
+                                                    Ok(out) => {
+                                                        self.status_message = Some((format!("✅ Variante isolée prête pour BESS : {}", out.display()), false));
+                                                    }
+                                                    Err(e) => {
+                                                        self.status_message = Some((format!("❌ Erreur isolation : {e}"), true));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+                                });
+
+                                if let Some(cfg) = v.main_config() {
+                                    ui.horizontal(|ui| {
+                                        if let Some(p) = cfg.power_hp {
+                                            ui.label(format!("⚡ {:.0} ch", p));
+                                        }
+                                        if let Some(t) = cfg.torque_nm {
+                                            ui.label(format!("| 🔧 {:.0} Nm", t));
+                                        }
+                                        if let Some(w) = cfg.weight_kg {
+                                            ui.label(format!("| ⚖ {:.0} kg", w));
+                                        }
+                                        if let Some(dt) = &cfg.drivetrain {
+                                            ui.label(format!("| ⚙ {}", dt));
+                                        }
+                                        if let Some(tr) = &cfg.transmission {
+                                            ui.label(format!("| 🕹 {}", tr));
+                                        }
+                                    });
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
+                    });
+                }
+            } else {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(50.0);
+                    ui.label(RichText::new("Sélectionnez un châssis pour gérer ses variantes").italics());
+                });
+            }
+        });
+    }
+
+    fn render_vehicles_tab(&mut self, ctx: &egui::Context) {
         let filtered_indices: Vec<usize> = self
             .vehicles
             .iter()

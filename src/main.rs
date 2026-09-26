@@ -1,5 +1,7 @@
 use babm::app::BabmApp;
 use babm::cli::{Cli, Commands};
+use babm::grouper::Grouper;
+use babm::merger::Merger;
 use babm::paths::DetectedPaths;
 use babm::scanner;
 use clap::Parser;
@@ -89,12 +91,126 @@ fn main() -> Result<(), eframe::Error> {
             Ok(())
         }
 
+        Some(Commands::Groups { path }) => {
+            let paths = DetectedPaths::detect();
+            let target_dir = path
+                .or_else(|| paths.beamng_mods_dirs.first().cloned())
+                .unwrap_or_else(|| PathBuf::from("."));
+
+            let vehicles = scanner::scan_directory(&target_dir);
+            let groups = Grouper::group_vehicles(&vehicles, &paths);
+
+            println!("\n=== Groupes de châssis détectés dans {} ===\n", target_dir.display());
+            for g in &groups {
+                println!("🚗 Châssis : {} ({} variante(s))", g.chassis_name, g.variants.len());
+                for v in &g.variants {
+                    let main_cfg = v.main_config();
+                    let power = main_cfg
+                        .and_then(|c| c.power_hp)
+                        .map(|p| format!("{:.0} ch", p))
+                        .unwrap_or_else(|| "-".into());
+                    println!("    ├── {} [{}] (file: {})", v.display_name, power, v.file_name);
+                }
+                println!();
+            }
+            Ok(())
+        }
+
+        Some(Commands::Merge { chassis, path }) => {
+            let paths = DetectedPaths::detect();
+            let target_dir = path
+                .or_else(|| paths.beamng_mods_dirs.first().cloned())
+                .unwrap_or_else(|| PathBuf::from("."));
+
+            let vehicles = scanner::scan_directory(&target_dir);
+            let groups = Grouper::group_vehicles(&vehicles, &paths);
+
+            let group = groups
+                .into_iter()
+                .find(|g| g.chassis_name.eq_ignore_ascii_case(&chassis) || g.chassis_slug.eq_ignore_ascii_case(&chassis))
+                .ok_or_else(|| format!("Châssis '{}' introuvable dans {}.", chassis, target_dir.display()));
+
+            match group {
+                Ok(g) => {
+                    println!("\nFusion des {} variantes pour le châssis '{}'...", g.variants.len(), g.chassis_name);
+                    for v in &g.variants {
+                        println!("  + Inclusion de : {}", v.display_name);
+                    }
+
+                    match Merger::merge_variants(&g.chassis_name, &g.variants, &target_dir) {
+                        Ok(out) => {
+                            println!("\n✅ Succès ! Mod unifié créé : {}", out.display());
+                            println!("Les variantes séparées ont été archivées en toute sécurité dans .babm_backup/{} (réversible à 100%).\n", g.chassis_slug);
+                        }
+                        Err(e) => {
+                            eprintln!("\n❌ Erreur de fusion : {e}\n");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                }
+            }
+            Ok(())
+        }
+
+        Some(Commands::Unmerge { chassis, path }) => {
+            let paths = DetectedPaths::detect();
+            let target_dir = path
+                .or_else(|| paths.beamng_mods_dirs.first().cloned())
+                .unwrap_or_else(|| PathBuf::from("."));
+
+            println!("\nDéfusion du châssis '{}' dans {}...", chassis, target_dir.display());
+            match Merger::unmerge_chassis(&chassis, &target_dir) {
+                Ok(()) => {
+                    println!("✅ Succès ! Le mod fusionné a été retiré et tous les fichiers originaux de variantes ont été restaurés.\n");
+                }
+                Err(e) => {
+                    eprintln!("❌ Erreur : {e}\n");
+                }
+            }
+            Ok(())
+        }
+
+        Some(Commands::Isolate { target, out }) => {
+            let paths = DetectedPaths::detect();
+            let target_dir = paths.beamng_mods_dirs.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+            let out_dir = out.unwrap_or_else(|| PathBuf::from("."));
+
+            let target_path = PathBuf::from(&target);
+            let zip_to_isolate = if target_path.is_file() {
+                target_path
+            } else {
+                let vehicles = scanner::scan_directory(&target_dir);
+                let found = vehicles.into_iter().find(|v| {
+                    v.display_name.eq_ignore_ascii_case(&target)
+                        || v.internal_name.eq_ignore_ascii_case(&target)
+                        || v.file_name.eq_ignore_ascii_case(&target)
+                });
+                found.map(|v| v.file_path).unwrap_or(PathBuf::new())
+            };
+
+            if !zip_to_isolate.is_file() {
+                eprintln!("Variante '{}' introuvable.", target);
+                return Ok(());
+            }
+
+            match Merger::isolate_variant_for_bess(&zip_to_isolate, &out_dir) {
+                Ok(path) => {
+                    println!("\n✅ Variante isolée prête pour BESS créée : {}\n", path.display());
+                }
+                Err(e) => {
+                    eprintln!("❌ Erreur : {e}\n");
+                }
+            }
+            Ok(())
+        }
+
         Some(Commands::Info { target }) => {
             let target_path = PathBuf::from(&target);
             let vehicle = if target_path.is_file() {
                 scanner::inspect_vehicle_zip(&target_path)
             } else {
-                // Search in detected mods directories
                 let paths = DetectedPaths::detect();
                 let mut found = None;
                 for dir in &paths.beamng_mods_dirs {
