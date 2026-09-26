@@ -87,6 +87,27 @@ impl Merger {
                 default_pc = v.default_config.clone();
             }
 
+            // Determine variant trim name and BESS status for tagging parts in BeamNG configurator
+            let trim_name = v
+                .main_config()
+                .map(|c| {
+                    c.name
+                        .trim_end_matches(" (BESS)")
+                        .trim_end_matches(" [BESS]")
+                        .trim()
+                        .to_string()
+                })
+                .unwrap_or_else(|| {
+                    v.display_name
+                        .trim_end_matches(" [BESS]")
+                        .split_whitespace()
+                        .last()
+                        .unwrap_or("Var")
+                        .to_string()
+                });
+
+            let is_bess = v.file_name.starts_with("bess-variant-") || v.display_name.contains("[BESS]");
+
             for i in 0..archive.len() {
                 let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
                 let original_name = entry.name().to_string();
@@ -172,7 +193,12 @@ impl Merger {
                         // Replace "vehicles/<old>/" with "vehicles/<new>/"
                         let old_ref = format!("vehicles/{}/", v.internal_name);
                         let new_ref = format!("vehicles/{}/", chassis_slug);
-                        let modified_text = text.replace(&old_ref, &new_ref);
+                        let mut modified_text = text.replace(&old_ref, &new_ref);
+
+                        // Tag part names in JBeam information blocks with variant and BESS
+                        if new_entry_name.ends_with(".jbeam") && !new_entry_name.ends_with("camso_core.jbeam") {
+                            modified_text = tag_jbeam_part_names(&modified_text, &trim_name, is_bess);
+                        }
 
                         zip_writer
                             .start_file(&new_entry_name, options)
@@ -324,3 +350,169 @@ impl Merger {
         Ok(out_file)
     }
 }
+
+/// Appends variant name tag (e.g. `[A]`) and/or BESS tag (`[BESS]`)
+/// to all part display names inside JBeam `"information": { "name": "..." }` blocks.
+pub fn tag_jbeam_part_names(text: &str, trim_name: &str, is_bess: bool) -> String {
+    if trim_name.is_empty() && !is_bess {
+        return text.to_string();
+    }
+
+    let bytes = text.as_bytes();
+    let mut result = String::with_capacity(text.len() + 256);
+    let mut i = 0;
+
+    let trim_tag = if !trim_name.is_empty() {
+        format!("[{}]", trim_name)
+    } else {
+        String::new()
+    };
+
+    while i < bytes.len() {
+        // Match `"information"`
+        if bytes[i..].starts_with(b"\"information\"") {
+            result.push_str("\"information\"");
+            i += "\"information\"".len();
+
+            // Match through whitespace and `:`
+            while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+
+            // Match whitespace until `{`
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                result.push(bytes[i] as char);
+                i += 1;
+            }
+
+            if i < bytes.len() && bytes[i] == b'{' {
+                result.push('{');
+                i += 1;
+
+                // Inside `"information": { ... }`
+                let mut depth = 1;
+                while i < bytes.len() && depth > 0 {
+                    if bytes[i..].starts_with(b"//") {
+                        while i < bytes.len() && bytes[i] != b'\n' {
+                            result.push(bytes[i] as char);
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    if bytes[i..].starts_with(b"/*") {
+                        result.push_str("/*");
+                        i += 2;
+                        while i < bytes.len() && !bytes[i..].starts_with(b"*/") {
+                            result.push(bytes[i] as char);
+                            i += 1;
+                        }
+                        if i < bytes.len() {
+                            result.push_str("*/");
+                            i += 2;
+                        }
+                        continue;
+                    }
+
+                    // Check for `"name"`
+                    if bytes[i..].starts_with(b"\"name\"") {
+                        result.push_str("\"name\"");
+                        i += "\"name\"".len();
+
+                        // Consume whitespace and `:`
+                        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+                            result.push(bytes[i] as char);
+                            i += 1;
+                        }
+                        // Consume whitespace until `"`
+                        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                            result.push(bytes[i] as char);
+                            i += 1;
+                        }
+
+                        if i < bytes.len() && bytes[i] == b'"' {
+                            result.push('"');
+                            i += 1;
+                            let val_start = i;
+                            while i < bytes.len() && bytes[i] != b'"' {
+                                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                                    i += 2;
+                                } else {
+                                    i += 1;
+                                }
+                            }
+                            let val = &text[val_start..i];
+                            let mut new_val = val.to_string();
+
+                            // Add trim tag if not present
+                            if !trim_tag.is_empty() && !new_val.contains(&trim_tag) {
+                                new_val = format!("{} {}", new_val.trim_end(), trim_tag);
+                            }
+
+                            // Add BESS tag if BESS and not present
+                            if is_bess && !new_val.contains("[BESS]") {
+                                new_val = format!("{} [BESS]", new_val.trim_end());
+                            }
+
+                            result.push_str(&new_val);
+
+                            if i < bytes.len() && bytes[i] == b'"' {
+                                result.push('"');
+                                i += 1;
+                            }
+                            continue;
+                        }
+                    }
+
+                    if bytes[i] == b'{' {
+                        depth += 1;
+                    } else if bytes[i] == b'}' {
+                        depth -= 1;
+                    }
+
+                    result.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tag_jbeam_part_names() {
+        let sample = r#"{
+    "Camso_Engine_87fb0": {
+        "information":{
+            "authors":"Camshaft Software",
+            "name":"I1000 4B",
+            "value":6000
+        },
+        "slotType": "Camso_Engine"
+    },
+    "Camso_Transmission_19efe": {
+        "information": {
+            "name": "A 4-Speed Manual Transmission",
+            "value": 1100
+        }
+    }
+}"#;
+
+        let tagged = tag_jbeam_part_names(sample, "A", false);
+        assert!(tagged.contains("\"name\":\"I1000 4B [A]\""));
+        assert!(tagged.contains("\"name\": \"A 4-Speed Manual Transmission [A]\""));
+
+        let tagged_bess = tag_jbeam_part_names(sample, "A", true);
+        assert!(tagged_bess.contains("\"name\":\"I1000 4B [A] [BESS]\""));
+        assert!(tagged_bess.contains("\"name\": \"A 4-Speed Manual Transmission [A] [BESS]\""));
+    }
+}
+
