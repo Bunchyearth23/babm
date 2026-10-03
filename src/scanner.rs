@@ -13,10 +13,11 @@ pub fn scan_directory(dir: &Path) -> Vec<VehicleMod> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() && path.extension().is_some_and(|ext| ext == "zip") {
-                if let Ok(vehicle) = inspect_vehicle_zip(&path) {
-                    vehicles.push(vehicle);
-                }
+            if path.is_file()
+                && path.extension().is_some_and(|ext| ext == "zip")
+                && let Ok(vehicle) = inspect_vehicle_zip(&path)
+            {
+                vehicles.push(vehicle);
             }
         }
     }
@@ -60,7 +61,16 @@ pub fn scan_directory(dir: &Path) -> Vec<VehicleMod> {
         }
     }
 
-    vehicles.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+    // Do not offer both the original and its validated complete BESS revision.
+    // Ambiguous candidates stay visible and are rejected by merge preflight.
+    if let Ok(preferred) = crate::bess::prefer_bess_variants(&vehicles) {
+        vehicles = preferred;
+    }
+    vehicles.sort_by(|a, b| {
+        a.display_name
+            .to_lowercase()
+            .cmp(&b.display_name.to_lowercase())
+    });
     vehicles
 }
 
@@ -87,7 +97,10 @@ pub fn inspect_vehicle_zip(path: &Path) -> Result<VehicleMod, String> {
 
         if name.starts_with("vehicles/") {
             let parts: Vec<&str> = name.split('/').collect();
-            if parts.len() > 1 && !parts[1].is_empty() && !vehicle_names.contains(&parts[1].to_string()) {
+            if parts.len() > 1
+                && !parts[1].is_empty()
+                && !vehicle_names.contains(&parts[1].to_string())
+            {
                 vehicle_names.push(parts[1].to_string());
             }
 
@@ -100,7 +113,9 @@ pub fn inspect_vehicle_zip(path: &Path) -> Result<VehicleMod, String> {
                     .trim_end_matches(".json")
                     .to_string();
                 config_indexes.push((config_key, i));
-            } else if (basename == "default.png" || basename.ends_with(".png")) && thumbnail_index.is_none() {
+            } else if (basename == "default.png" || basename.ends_with(".png"))
+                && thumbnail_index.is_none()
+            {
                 thumbnail_index = Some(i);
             }
 
@@ -120,31 +135,37 @@ pub fn inspect_vehicle_zip(path: &Path) -> Result<VehicleMod, String> {
             .unwrap_or_default()
     });
 
-    let is_bess = file_name.starts_with("bess-variant-")
+    let full_bess = crate::bess::read_marker(path)?.is_some();
+    let is_bess = full_bess
+        || file_name.starts_with("bess-variant-")
         || config_indexes.iter().any(|(k, _)| k.starts_with("bess_"));
 
     let mut display_name = internal_name.clone();
-    let mut author = if is_bess { "BESS / Automation".to_string() } else { "Unknown".to_string() };
+    let mut author = if is_bess {
+        "BESS / Automation".to_string()
+    } else {
+        "Unknown".to_string()
+    };
     let mut is_automation = is_bess;
     let mut default_config = None;
 
     if let Some(idx) = info_json_index {
         let mut entry = zip.by_index(idx).map_err(|e| e.to_string())?;
         let mut content = String::new();
-        if entry.read_to_string(&mut content).is_ok() {
-            if let Ok(val) = serde_json::from_str::<Value>(&content) {
-                if let Some(name) = val.get("Name").and_then(|v| v.as_str()) {
-                    display_name = name.to_string();
-                }
-                if let Some(auth) = val.get("Author").and_then(|v| v.as_str()) {
-                    author = auth.to_string();
-                }
-                if let Some(t) = val.get("Type").and_then(|v| v.as_str()) {
-                    is_automation = t.eq_ignore_ascii_case("automation");
-                }
-                if let Some(pc) = val.get("default_pc").and_then(|v| v.as_str()) {
-                    default_config = Some(pc.to_string());
-                }
+        if entry.read_to_string(&mut content).is_ok()
+            && let Ok(val) = serde_json::from_str::<Value>(&content)
+        {
+            if let Some(name) = val.get("Name").and_then(|v| v.as_str()) {
+                display_name = name.to_string();
+            }
+            if let Some(auth) = val.get("Author").and_then(|v| v.as_str()) {
+                author = auth.to_string();
+            }
+            if let Some(t) = val.get("Type").and_then(|v| v.as_str()) {
+                is_automation = t.eq_ignore_ascii_case("automation");
+            }
+            if let Some(pc) = val.get("default_pc").and_then(|v| v.as_str()) {
+                default_config = Some(pc.to_string());
             }
         }
     } else if is_bess {
@@ -156,53 +177,77 @@ pub fn inspect_vehicle_zip(path: &Path) -> Result<VehicleMod, String> {
     for (key, idx) in config_indexes {
         if let Ok(mut entry) = zip.by_index(idx) {
             let mut content = String::new();
-            if entry.read_to_string(&mut content).is_ok() {
-                if let Ok(v) = serde_json::from_str::<Value>(&content) {
-                    let config_name = v
-                        .get("Configuration")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or(&key)
-                        .to_string();
+            if entry.read_to_string(&mut content).is_ok()
+                && let Ok(v) = serde_json::from_str::<Value>(&content)
+            {
+                let config_name = v
+                    .get("Configuration")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or(&key)
+                    .to_string();
 
-                    let weight_kg = v.get("Weight").and_then(|s| s.as_f64()).map(|f| f as f32);
-                    let power_hp = v.get("Power").and_then(|s| s.as_f64()).map(|f| f as f32);
-                    let torque_nm = v.get("Torque").and_then(|s| s.as_f64()).map(|f| f as f32);
-                    let power_peak_rpm = v.get("PowerPeakRPM").and_then(|s| s.as_f64()).map(|f| f as f32);
-                    let torque_peak_rpm = v.get("TorquePeakRPM").and_then(|s| s.as_f64()).map(|f| f as f32);
-                    let top_speed_kmh = v.get("Top Speed").and_then(|s| s.as_f64()).map(|f| (f * 3.6) as f32);
-                    let accel_0_100 = v.get("0-100 km/h").and_then(|s| s.as_f64()).map(|f| f as f32);
-                    let drivetrain = v.get("Drivetrain").and_then(|s| s.as_str()).map(|s| s.to_string());
-                    let transmission = v.get("Transmission").and_then(|s| s.as_str()).map(|s| s.to_string());
-                    let fuel_type = v.get("Fuel Type").and_then(|s| s.as_str()).map(|s| s.to_string());
-                    let induction = v.get("Induction Type").and_then(|s| s.as_str()).map(|s| s.to_string());
+                let weight_kg = v.get("Weight").and_then(|s| s.as_f64()).map(|f| f as f32);
+                let power_hp = v.get("Power").and_then(|s| s.as_f64()).map(|f| f as f32);
+                let torque_nm = v.get("Torque").and_then(|s| s.as_f64()).map(|f| f as f32);
+                let power_peak_rpm = v
+                    .get("PowerPeakRPM")
+                    .and_then(|s| s.as_f64())
+                    .map(|f| f as f32);
+                let torque_peak_rpm = v
+                    .get("TorquePeakRPM")
+                    .and_then(|s| s.as_f64())
+                    .map(|f| f as f32);
+                let top_speed_kmh = v
+                    .get("Top Speed")
+                    .and_then(|s| s.as_f64())
+                    .map(|f| (f * 3.6) as f32);
+                let accel_0_100 = v
+                    .get("0-100 km/h")
+                    .and_then(|s| s.as_f64())
+                    .map(|f| f as f32);
+                let drivetrain = v
+                    .get("Drivetrain")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                let transmission = v
+                    .get("Transmission")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                let fuel_type = v
+                    .get("Fuel Type")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                let induction = v
+                    .get("Induction Type")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
 
-                    let (year_min, year_max) = if let Some(years) = v.get("Years") {
-                        (
-                            years.get("min").and_then(|n| n.as_u64()).map(|n| n as u32),
-                            years.get("max").and_then(|n| n.as_u64()).map(|n| n as u32),
-                        )
-                    } else {
-                        (None, None)
-                    };
+                let (year_min, year_max) = if let Some(years) = v.get("Years") {
+                    (
+                        years.get("min").and_then(|n| n.as_u64()).map(|n| n as u32),
+                        years.get("max").and_then(|n| n.as_u64()).map(|n| n as u32),
+                    )
+                } else {
+                    (None, None)
+                };
 
-                    configs.push(VehicleConfig {
-                        config_key: key,
-                        name: config_name,
-                        weight_kg,
-                        power_hp,
-                        torque_nm,
-                        power_peak_rpm,
-                        torque_peak_rpm,
-                        top_speed_kmh,
-                        accel_0_100,
-                        drivetrain,
-                        transmission,
-                        fuel_type,
-                        induction,
-                        year_min,
-                        year_max,
-                    });
-                }
+                configs.push(VehicleConfig {
+                    config_key: key,
+                    name: config_name,
+                    weight_kg,
+                    power_hp,
+                    torque_nm,
+                    power_peak_rpm,
+                    torque_peak_rpm,
+                    top_speed_kmh,
+                    accel_0_100,
+                    drivetrain,
+                    transmission,
+                    fuel_type,
+                    induction,
+                    year_min,
+                    year_max,
+                });
             }
         }
     }
@@ -243,17 +288,19 @@ pub fn inspect_vehicle_zip(path: &Path) -> Result<VehicleMod, String> {
 
     // Read thumbnail bytes
     let mut thumbnail_png = None;
-    if let Some(idx) = thumbnail_index {
-        if let Ok(mut entry) = zip.by_index(idx) {
-            if entry.size() < 10_000_000 {
-                let mut bytes = Vec::new();
-                if entry.read_to_end(&mut bytes).is_ok() {
-                    thumbnail_png = Some(bytes);
-                }
-            }
+    if let Some(idx) = thumbnail_index
+        && let Ok(mut entry) = zip.by_index(idx)
+        && entry.size() < 10_000_000
+    {
+        let mut bytes = Vec::new();
+        if entry.read_to_end(&mut bytes).is_ok() {
+            thumbnail_png = Some(bytes);
         }
     }
 
+    if full_bess && !display_name.ends_with(" (BESS)") && !display_name.ends_with(" [BESS]") {
+        display_name.push_str(" (BESS)");
+    }
     Ok(VehicleMod {
         file_path: path.to_path_buf(),
         file_name,
@@ -360,5 +407,8 @@ pub fn pretty_title_from_slug(slug: &str) -> String {
 
 fn is_roman_numeral(s: &str) -> bool {
     let s = s.to_uppercase();
-    matches!(s.as_str(), "I" | "II" | "III" | "IV" | "V" | "VI" | "VII" | "VIII" | "IX" | "X")
+    matches!(
+        s.as_str(),
+        "I" | "II" | "III" | "IV" | "V" | "VI" | "VII" | "VIII" | "IX" | "X"
+    )
 }

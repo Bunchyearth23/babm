@@ -17,7 +17,10 @@ pub struct Grouper;
 impl Grouper {
     /// Groups a list of vehicles by chassis/family.
     /// Uses Automation SQLite database if available, otherwise heuristic name matching.
-    pub fn group_vehicles(vehicles: &[VehicleMod], detected_paths: &DetectedPaths) -> Vec<ChassisGroup> {
+    pub fn group_vehicles(
+        vehicles: &[VehicleMod],
+        detected_paths: &DetectedPaths,
+    ) -> Vec<ChassisGroup> {
         let db_mapping = detected_paths
             .automation_user_dir
             .as_ref()
@@ -40,11 +43,17 @@ impl Grouper {
         let mut result = Vec::new();
         for (chassis_name, mut variants) in groups {
             // Sort variants by display name
-            variants.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+            variants.sort_by(|a, b| {
+                a.display_name
+                    .to_lowercase()
+                    .cmp(&b.display_name.to_lowercase())
+            });
             let slug = slugify(&chassis_name);
 
             // Check if there is already a merged mod
-            let is_merged = variants.iter().any(|v| v.file_name.starts_with("babm_") || v.configs.len() > 1);
+            let is_merged = variants
+                .iter()
+                .any(|v| v.file_name.starts_with("babm_") || v.configs.len() > 1);
 
             result.push(ChassisGroup {
                 chassis_name,
@@ -55,7 +64,11 @@ impl Grouper {
             });
         }
 
-        result.sort_by(|a, b| a.chassis_name.to_lowercase().cmp(&b.chassis_name.to_lowercase()));
+        result.sort_by(|a, b| {
+            a.chassis_name
+                .to_lowercase()
+                .cmp(&b.chassis_name.to_lowercase())
+        });
         result
     }
 }
@@ -108,7 +121,10 @@ fn load_automation_db_mapping(user_dir: &Path) -> Option<HashMap<String, String>
 }
 
 fn find_chassis_from_db(v: &VehicleMod, map: &HashMap<String, String>) -> Option<String> {
-    let clean = v.display_name.trim_end_matches(" [BESS]").trim_end_matches(" (BESS)");
+    let clean = v
+        .display_name
+        .trim_end_matches(" [BESS]")
+        .trim_end_matches(" (BESS)");
     let lower_display = clean.to_lowercase();
     if let Some(m) = map.get(&lower_display) {
         return Some(m.clone());
@@ -121,10 +137,10 @@ fn find_chassis_from_db(v: &VehicleMod, map: &HashMap<String, String>) -> Option
 
     // Try without author prefix (e.g. bunchyearth23_b5_a -> b5_a)
     for prefix in ["bunchyearth23_", "camso_"] {
-        if let Some(stripped) = lower_internal.strip_prefix(prefix) {
-            if let Some(m) = map.get(stripped) {
-                return Some(m.clone());
-            }
+        if let Some(stripped) = lower_internal.strip_prefix(prefix)
+            && let Some(m) = map.get(stripped)
+        {
+            return Some(m.clone());
         }
     }
 
@@ -133,13 +149,19 @@ fn find_chassis_from_db(v: &VehicleMod, map: &HashMap<String, String>) -> Option
 
 /// Fallback heuristic deduction of chassis name
 fn deduce_chassis_name(display_name: &str, internal_name: &str) -> String {
-    let clean_display = display_name.trim_end_matches(" [BESS]").trim_end_matches(" (BESS)");
+    let clean_display = display_name
+        .trim_end_matches(" [BESS]")
+        .trim_end_matches(" (BESS)");
     // If display name has multiple parts, e.g. "B5 A" -> "B5", "Volk Icarus II" -> "Volk Icarus"
     let parts: Vec<&str> = clean_display.split_whitespace().collect();
     if parts.len() > 1 {
         // If last part is single letter (A, C, GT, etc.) or Roman numeral
         let last = parts.last().copied().unwrap_or("");
-        if last.len() == 1 || is_roman_numeral(last) || ["gt", "tc", "sport", "turbo", "base", "uno", "coupe"].contains(&last.to_lowercase().as_str()) {
+        if last.len() == 1
+            || is_roman_numeral(last)
+            || ["gt", "tc", "sport", "turbo", "base", "uno", "coupe"]
+                .contains(&last.to_lowercase().as_str())
+        {
             return parts[..parts.len() - 1].join(" ");
         }
     }
@@ -155,17 +177,23 @@ fn deduce_chassis_name(display_name: &str, internal_name: &str) -> String {
     let subparts: Vec<&str> = clean_internal.split('_').collect();
     if subparts.len() > 1 {
         let last = subparts.last().copied().unwrap_or("");
-        if last.len() <= 2 || is_roman_numeral(last) || ["gt", "tc", "base"].contains(&last.to_lowercase().as_str()) {
+        if last.len() <= 2
+            || is_roman_numeral(last)
+            || ["gt", "tc", "base"].contains(&last.to_lowercase().as_str())
+        {
             return uppercase_first(&subparts[..subparts.len() - 1].join(" "));
         }
     }
 
-    display_name.to_string()
+    clean_display.to_string()
 }
 
 fn is_roman_numeral(s: &str) -> bool {
     let s = s.to_uppercase();
-    matches!(s.as_str(), "I" | "II" | "III" | "IV" | "V" | "VI" | "VII" | "VIII" | "IX" | "X")
+    matches!(
+        s.as_str(),
+        "I" | "II" | "III" | "IV" | "V" | "VI" | "VII" | "VIII" | "IX" | "X"
+    )
 }
 
 pub fn slugify(s: &str) -> String {

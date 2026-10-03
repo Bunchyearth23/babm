@@ -7,10 +7,68 @@ use babm::scanner;
 use clap::Parser;
 use std::path::PathBuf;
 
+fn bess_mods_dir(path: Option<PathBuf>) -> Result<PathBuf, String> {
+    let dir = path
+        .or_else(|| DetectedPaths::detect().beamng_mods_dirs.into_iter().next())
+        .ok_or_else(|| "BeamNG mods folder not detected; choose it with --path.".to_string())?;
+    if !dir.is_dir() {
+        return Err(format!("Mods folder does not exist: {}", dir.display()));
+    }
+    Ok(dir)
+}
+
+fn print_bess_result<T: serde::Serialize + std::fmt::Debug>(result: Result<T, String>, json: bool) {
+    match result {
+        Ok(value) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value).expect("serializable BESS result")
+                );
+            } else {
+                println!("{value:#?}");
+            }
+        }
+        Err(error) => {
+            if json {
+                println!("{}", serde_json::json!({"error": error}));
+            } else {
+                eprintln!("BESS: {error}");
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() -> Result<(), eframe::Error> {
     let cli = Cli::parse();
 
     match cli.command {
+        Some(Commands::BessScan {
+            path,
+            exports,
+            json,
+        }) => {
+            print_bess_result(
+                bess_mods_dir(path).and_then(|dir| babm::bess::discover(&dir, exports.as_deref())),
+                json,
+            );
+            Ok(())
+        }
+        Some(Commands::BessInspect { export, path, json }) => {
+            print_bess_result(
+                bess_mods_dir(path).and_then(|dir| babm::bess::inspect_update(&dir, &export)),
+                json,
+            );
+            Ok(())
+        }
+        Some(Commands::BessApply { export, path, json }) => {
+            print_bess_result(
+                bess_mods_dir(path).and_then(|dir| babm::bess::apply_update(&dir, &export)),
+                json,
+            );
+            Ok(())
+        }
         Some(Commands::Paths) => {
             let paths = DetectedPaths::detect();
             println!("\n=== BABM - Detected Paths ===");
@@ -39,7 +97,10 @@ fn main() -> Result<(), eframe::Error> {
             Ok(())
         }
 
-        Some(Commands::Scan { path, automation_only }) => {
+        Some(Commands::Scan {
+            path,
+            automation_only,
+        }) => {
             let paths = DetectedPaths::detect();
             let target_dir = path
                 .or_else(|| paths.beamng_mods_dirs.first().cloned())
@@ -57,7 +118,10 @@ fn main() -> Result<(), eframe::Error> {
                 return Ok(());
             }
 
-            println!("{:<32} {:<24} {:<12} {:<10} {:<10}", "VEHICLE NAME", "FILE", "POWER", "WEIGHT", "TYPE");
+            println!(
+                "{:<32} {:<24} {:<12} {:<10} {:<10}",
+                "VEHICLE NAME", "FILE", "POWER", "WEIGHT", "TYPE"
+            );
             println!("{:-<95}", "");
 
             for v in &vehicles {
@@ -70,7 +134,11 @@ fn main() -> Result<(), eframe::Error> {
                     .and_then(|c| c.weight_kg)
                     .map(|w| format!("{:.0} kg", w))
                     .unwrap_or_else(|| "-".into());
-                let tag = if v.is_automation { "Automation" } else { "BeamNG" };
+                let tag = if v.is_automation {
+                    "Automation"
+                } else {
+                    "BeamNG"
+                };
 
                 let short_name = if v.display_name.len() > 30 {
                     format!("{}...", &v.display_name[..27])
@@ -84,7 +152,10 @@ fn main() -> Result<(), eframe::Error> {
                     v.file_name.clone()
                 };
 
-                println!("{:<32} {:<24} {:<12} {:<10} {:<10}", short_name, short_file, power, weight, tag);
+                println!(
+                    "{:<32} {:<24} {:<12} {:<10} {:<10}",
+                    short_name, short_file, power, weight, tag
+                );
             }
 
             println!("\nTotal: {} vehicle(s) found.\n", vehicles.len());
@@ -100,16 +171,26 @@ fn main() -> Result<(), eframe::Error> {
             let vehicles = scanner::scan_directory(&target_dir);
             let groups = Grouper::group_vehicles(&vehicles, &paths);
 
-            println!("\n=== Detected Chassis Groups in {} ===\n", target_dir.display());
+            println!(
+                "\n=== Detected Chassis Groups in {} ===\n",
+                target_dir.display()
+            );
             for g in &groups {
-                println!("🚗 Chassis: {} ({} variant(s))", g.chassis_name, g.variants.len());
+                println!(
+                    "🚗 Chassis: {} ({} variant(s))",
+                    g.chassis_name,
+                    g.variants.len()
+                );
                 for v in &g.variants {
                     let main_cfg = v.main_config();
                     let power = main_cfg
                         .and_then(|c| c.power_hp)
                         .map(|p| format!("{:.0} hp", p))
                         .unwrap_or_else(|| "-".into());
-                    println!("    ├── {} [{}] (file: {})", v.display_name, power, v.file_name);
+                    println!(
+                        "    ├── {} [{}] (file: {})",
+                        v.display_name, power, v.file_name
+                    );
                 }
                 println!();
             }
@@ -127,12 +208,25 @@ fn main() -> Result<(), eframe::Error> {
 
             let group = groups
                 .into_iter()
-                .find(|g| g.chassis_name.eq_ignore_ascii_case(&chassis) || g.chassis_slug.eq_ignore_ascii_case(&chassis))
-                .ok_or_else(|| format!("Chassis '{}' not found in {}.", chassis, target_dir.display()));
+                .find(|g| {
+                    g.chassis_name.eq_ignore_ascii_case(&chassis)
+                        || g.chassis_slug.eq_ignore_ascii_case(&chassis)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "Chassis '{}' not found in {}.",
+                        chassis,
+                        target_dir.display()
+                    )
+                });
 
             match group {
                 Ok(g) => {
-                    println!("\nMerging {} variants for chassis '{}'...", g.variants.len(), g.chassis_name);
+                    println!(
+                        "\nMerging {} variants for chassis '{}'...",
+                        g.variants.len(),
+                        g.chassis_name
+                    );
                     for v in &g.variants {
                         println!("  + Including: {}", v.display_name);
                     }
@@ -140,7 +234,10 @@ fn main() -> Result<(), eframe::Error> {
                     match Merger::merge_variants(&g.chassis_name, &g.variants, &target_dir) {
                         Ok(out) => {
                             println!("\n✅ Success! Unified mod created: {}", out.display());
-                            println!("Original variants safely backed up in .babm_backup/{} (100% reversible).\n", g.chassis_slug);
+                            println!(
+                                "Original variants safely backed up in .babm_backup/{} (100% reversible).\n",
+                                g.chassis_slug
+                            );
                         }
                         Err(e) => {
                             eprintln!("\n❌ Merge error: {e}\n");
@@ -160,10 +257,16 @@ fn main() -> Result<(), eframe::Error> {
                 .or_else(|| paths.beamng_mods_dirs.first().cloned())
                 .unwrap_or_else(|| PathBuf::from("."));
 
-            println!("\nUnmerging chassis '{}' in {}...", chassis, target_dir.display());
+            println!(
+                "\nUnmerging chassis '{}' in {}...",
+                chassis,
+                target_dir.display()
+            );
             match Merger::unmerge_chassis(&chassis, &target_dir) {
                 Ok(()) => {
-                    println!("✅ Success! Merged mod removed and all original variant files restored.\n");
+                    println!(
+                        "✅ Success! Merged mod removed and all original variant files restored.\n"
+                    );
                 }
                 Err(e) => {
                     eprintln!("❌ Error: {e}\n");
@@ -174,7 +277,11 @@ fn main() -> Result<(), eframe::Error> {
 
         Some(Commands::Isolate { target, out }) => {
             let paths = DetectedPaths::detect();
-            let target_dir = paths.beamng_mods_dirs.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+            let target_dir = paths
+                .beamng_mods_dirs
+                .first()
+                .cloned()
+                .unwrap_or_else(|| PathBuf::from("."));
             let out_dir = out.unwrap_or_else(|| PathBuf::from("."));
 
             let target_path = PathBuf::from(&target);
@@ -197,7 +304,10 @@ fn main() -> Result<(), eframe::Error> {
 
             match Merger::isolate_variant_for_bess(&zip_to_isolate, &out_dir) {
                 Ok(path) => {
-                    println!("\n✅ Isolated variant ready for BESS created: {}\n", path.display());
+                    println!(
+                        "\n✅ Isolated variant ready for BESS created: {}\n",
+                        path.display()
+                    );
                 }
                 Err(e) => {
                     eprintln!("❌ Error: {e}\n");
@@ -232,9 +342,19 @@ fn main() -> Result<(), eframe::Error> {
                     println!("\n=== Vehicle Details: {} ===", v.display_name);
                     println!("Internal name : {}", v.internal_name);
                     println!("Author        : {}", v.author);
-                    println!("Source        : {}", if v.is_automation { "Automation Export" } else { "BeamNG Mod" });
+                    println!(
+                        "Source        : {}",
+                        if v.is_automation {
+                            "Automation Export"
+                        } else {
+                            "BeamNG Mod"
+                        }
+                    );
                     println!("File          : {}", v.file_path.display());
-                    println!("Size          : {:.2} MB", v.file_size_bytes as f64 / (1024.0 * 1024.0));
+                    println!(
+                        "Size          : {:.2} MB",
+                        v.file_size_bytes as f64 / (1024.0 * 1024.0)
+                    );
 
                     if let Some(ref eng) = v.engine {
                         println!("\n[Engine (JBeam Extraction)]");
@@ -280,7 +400,11 @@ fn main() -> Result<(), eframe::Error> {
             Ok(())
         }
 
-        None | Some(Commands::Gui) => {
+        command @ (None | Some(Commands::Gui { .. })) => {
+            let (path, exports) = match command {
+                Some(Commands::Gui { path, exports }) => (path, exports),
+                _ => (None, None),
+            };
             let native_options = eframe::NativeOptions {
                 viewport: eframe::egui::ViewportBuilder::default()
                     .with_title("BABM — Bunchy's Automation BeamNG Management")
@@ -292,7 +416,7 @@ fn main() -> Result<(), eframe::Error> {
             eframe::run_native(
                 "BABM — Bunchy's Automation BeamNG Management",
                 native_options,
-                Box::new(|cc| Ok(Box::new(BabmApp::new(cc)))),
+                Box::new(move |cc| Ok(Box::new(BabmApp::new_with_options(cc, path, exports)))),
             )
         }
     }

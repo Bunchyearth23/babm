@@ -26,7 +26,7 @@ When you design multiple trims, variants, and engine configurations of a car mod
 - **Chassis Model Grouping**: Identifies chassis families using Automation's SQLite database (`Sandbox_*.db`) or smart heuristic name matching.
 - **Part Selector Disambiguation**: Adds `[{variant}]` and `[BESS]` tags to part names inside JBeam definitions, so parts from different trims are clearly separated in BeamNG's parts selector.
 - **Non-Destructive Merge & Unmerge**: Safely moves and stores original variant archives. Unmerging completely restores all original files and removes the unified mod.
-- **BESS Compatibility**: Fully compatible with [BESS (Bunchy's Engine Sound Synthesis)](https://github.com/Bunchyearth23/bess). Includes a one-click variant isolation tool to prepare any trim for standalone BESS sound synthesis.
+- **BESS sound exchange**: Open preserved originals in [BESS](https://github.com/Bunchyearth23/bess), discover its complete-vehicle exports, and explicitly apply their sounds to the matching individual vehicle or grouped pack. Original sources, other variants and regrouped variables are preserved.
 - **Accurate Engine & JBeam Parsing**: Correctly computes real engine redline RPM using `revLimiterRPM` instead of fallback overrev limits, and extracts cylinders, idle RPM, power, torque, and weight.
 - **Multithreaded GUI**: Asynchronous background operations ensure the UI remains smooth and responsive during merging, unmerging, and file scanning.
 - **Dual Mode (GUI & CLI)**: Run as an interactive desktop GUI powered by `egui`/`eframe`, or automate via a fast command-line interface.
@@ -43,6 +43,7 @@ Simply launch `BABM.exe`. BABM will automatically scan your BeamNG user and mods
 
 - **Chassis & Variants Tab**: View detected chassis families, inspect trims, and click **Merge variants** or **Unmerge / Restore**.
 - **All Vehicles Tab**: Browse all installed vehicles with detailed engine specs, power curves, weight, and configuration lists.
+- **BESS sounds Tab**: Review discovered exports, their matched vehicle and readiness, then select **Apply BESS sounds**. Newer valid exports replace the original trim's sounds; older selectable BESS add-on configurations keep their separate routing. Use **Edit sound in BESS** on a preserved original to begin another edit. Place `BESS.exe` beside `BABM.exe` for direct launching.
 - **Paths & Diagnostics Tab**: Verify detected directories or configure custom mod search paths.
 
 ---
@@ -78,7 +79,17 @@ babm isolate "VariantName" -o ./bess_export
 
 # Inspect detailed specs and JBeam data of a vehicle ZIP
 babm info "vehicles/my_car.zip"
+
+# Inspect or apply complete BESS sound exports (scan/inspect never change mods)
+babm bess-scan --path ./mods --exports ./BESS-exports --json
+babm bess-inspect ./BESS-exports/run/vehicle.zip --path ./mods --json
+babm bess-apply ./BESS-exports/run/vehicle.zip --path ./mods --json
+
+# Open the BESS exchange view with explicit folders
+babm gui --path ./mods --exports ./BESS-exports
 ```
+
+The [BESS exchange contract and workflow](docs/BESS-BABM-EXCHANGE.md) describe source identities, revision selection, original preservation and the disposable cross-application verification procedure. Scans do not install exports. Applying retains archive history and refuses missing sources, conflicting revisions, ambiguous shared audio or unexpected target edits.
 
 ---
 

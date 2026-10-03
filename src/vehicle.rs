@@ -45,10 +45,10 @@ pub struct VehicleMod {
 
 impl VehicleMod {
     pub fn main_config(&self) -> Option<&VehicleConfig> {
-        if let Some(ref def) = self.default_config {
-            if let Some(cfg) = self.configs.iter().find(|c| &c.config_key == def) {
-                return Some(cfg);
-            }
+        if let Some(ref def) = self.default_config
+            && let Some(cfg) = self.configs.iter().find(|c| &c.config_key == def)
+        {
+            return Some(cfg);
         }
         self.configs.first()
     }

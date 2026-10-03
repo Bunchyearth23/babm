@@ -38,17 +38,41 @@ impl Merger {
             return Err("No variants selected for merging.".into());
         }
 
+        let _lock = crate::bess::ModsLock::acquire(mods_dir)?;
+        let all_inputs = crate::bess::merge_inputs(variants, mods_dir)?;
+        let preferred = crate::bess::prefer_bess_variants(&all_inputs)?;
+        let variants = preferred.as_slice();
+
         let chassis_slug = slugify(chassis_name);
         let output_filename = format!("babm_{}.zip", chassis_slug);
         let output_path = mods_dir.join(&output_filename);
+        if output_path.exists() {
+            return Err(
+                "This merged pack already exists. Apply its BESS audio update or unmerge it first."
+                    .into(),
+            );
+        }
+        crate::bess::check_merge_audio(variants, &chassis_slug)?;
+        let staged_output = crate::bess::unique_path(mods_dir, ".babm-merge", "tmp");
 
         let backup_dir = mods_dir.join(".babm_backup").join(&chassis_slug);
-        fs::create_dir_all(&backup_dir).map_err(|e| format!("Error creating backup directory: {e}"))?;
+        crate::bess::no_links(&backup_dir)?;
+        fs::create_dir_all(&backup_dir)
+            .map_err(|e| format!("Error creating backup directory: {e}"))?;
 
         // 1. Collect and backup original files
         let mut original_backups = Vec::new();
-        for v in variants {
+        for v in &all_inputs {
             let backup_dest = backup_dir.join(&v.file_name);
+            if backup_dest.exists()
+                && crate::bess::sha256_file(&backup_dest)?
+                    != crate::bess::sha256_file(&v.file_path)?
+            {
+                return Err(format!(
+                    "A different original backup already exists for {}",
+                    v.file_name
+                ));
+            }
             fs::copy(&v.file_path, &backup_dest)
                 .map_err(|e| format!("Error backing up {}: {e}", v.file_name))?;
 
@@ -60,8 +84,12 @@ impl Merger {
         }
 
         // 2. Prepare merged archive
-        let out_file = File::create(&output_path)
+        let out_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged_output)
             .map_err(|e| format!("Impossible de créer {}: {e}", output_path.display()))?;
+        let _staged_guard = crate::bess::StagedFile(staged_output.clone());
         let mut zip_writer = ZipWriter::new(out_file);
         let options = SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
@@ -106,11 +134,20 @@ impl Merger {
                         .to_string()
                 });
 
-            let is_bess = v.file_name.starts_with("bess-variant-") || v.display_name.contains("[BESS]");
+            let is_bess = v.file_name.starts_with("bess-variant-")
+                || v.display_name.contains("[BESS]")
+                || v.display_name.contains("(BESS)")
+                || crate::bess::read_marker(&v.file_path)?.is_some();
 
             for i in 0..archive.len() {
                 let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
                 let original_name = entry.name().to_string();
+                // Export provenance belongs to one original, not the combined
+                // vehicle; source backups retain the complete marker.
+                if original_name == crate::bess::MARKER || original_name == "babm-bess-updates.json"
+                {
+                    continue;
+                }
 
                 if entry.is_dir() {
                     continue;
@@ -138,16 +175,14 @@ impl Merger {
                 if new_entry_name == format!("{}info.json", new_vehicle_prefix) {
                     // Extract paints from info.json
                     let mut text = String::new();
-                    if entry.read_to_string(&mut text).is_ok() {
-                        if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                            if let Some(paints) = v.get("paints").and_then(|p| p.as_object()) {
-                                if let Some(comb) = combined_paints.as_object_mut() {
-                                    for (k, val) in paints {
-                                        if !comb.contains_key(k) {
-                                            comb.insert(k.clone(), val.clone());
-                                        }
-                                    }
-                                }
+                    if entry.read_to_string(&mut text).is_ok()
+                        && let Ok(v) = serde_json::from_str::<Value>(&text)
+                        && let Some(paints) = v.get("paints").and_then(|p| p.as_object())
+                        && let Some(comb) = combined_paints.as_object_mut()
+                    {
+                        for (k, val) in paints {
+                            if !comb.contains_key(k) {
+                                comb.insert(k.clone(), val.clone());
                             }
                         }
                     }
@@ -157,15 +192,16 @@ impl Merger {
                 if new_entry_name == format!("{}camso_core.jbeam", new_vehicle_prefix) {
                     // Extract the default trim part for slot
                     let mut text = String::new();
-                    if entry.read_to_string(&mut text).is_ok() && first_trim_part.is_none() {
-                        if let Some(pos) = text.find("\"Camso_Trim\"") {
-                            let after = &text[pos..];
-                            if let Some(line) = after.lines().next() {
-                                for word in line.split('"') {
-                                    if word.starts_with("Camso_Trim_") {
-                                        first_trim_part = Some(word.to_string());
-                                        break;
-                                    }
+                    if entry.read_to_string(&mut text).is_ok()
+                        && first_trim_part.is_none()
+                        && let Some(pos) = text.find("\"Camso_Trim\"")
+                    {
+                        let after = &text[pos..];
+                        if let Some(line) = after.lines().next() {
+                            for word in line.split('"') {
+                                if word.starts_with("Camso_Trim_") {
+                                    first_trim_part = Some(word.to_string());
+                                    break;
                                 }
                             }
                         }
@@ -196,8 +232,11 @@ impl Merger {
                         let mut modified_text = text.replace(&old_ref, &new_ref);
 
                         // Tag part names in JBeam information blocks with variant and BESS
-                        if new_entry_name.ends_with(".jbeam") && !new_entry_name.ends_with("camso_core.jbeam") {
-                            modified_text = tag_jbeam_part_names(&modified_text, &trim_name, is_bess);
+                        if new_entry_name.ends_with(".jbeam")
+                            && !new_entry_name.ends_with("camso_core.jbeam")
+                        {
+                            modified_text =
+                                tag_jbeam_part_names(&modified_text, &trim_name, is_bess);
                         }
 
                         zip_writer
@@ -236,7 +275,11 @@ impl Merger {
             .start_file(&info_path, options)
             .map_err(|e| e.to_string())?;
         zip_writer
-            .write_all(serde_json::to_string_pretty(&unified_info).unwrap().as_bytes())
+            .write_all(
+                serde_json::to_string_pretty(&unified_info)
+                    .unwrap()
+                    .as_bytes(),
+            )
             .map_err(|e| e.to_string())?;
 
         // 4. Write unified camso_core.jbeam
@@ -271,7 +314,11 @@ impl Merger {
             .write_all(core_jbeam.as_bytes())
             .map_err(|e| e.to_string())?;
 
-        zip_writer.finish().map_err(|e| format!("Error finalizing ZIP: {e}"))?;
+        zip_writer
+            .finish()
+            .map_err(|e| format!("Error finalizing ZIP: {e}"))?
+            .sync_all()
+            .map_err(|e| e.to_string())?;
 
         // 5. Write Manifest
         let manifest = MergeManifest {
@@ -282,14 +329,27 @@ impl Merger {
             created_at: format!("{:?}", std::time::SystemTime::now()),
         };
         let manifest_path = backup_dir.join("manifest.json");
+        crate::bess::no_links(&manifest_path)?;
         let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
         fs::write(manifest_path, manifest_json).map_err(|e| e.to_string())?;
+        fs::rename(&staged_output, &output_path)
+            .map_err(|e| format!("Cannot publish merged ZIP: {e}"))?;
 
         // 6. Move/disable original files to avoid duplicate vehicles in BeamNG menu
-        for v in variants {
+        for v in &all_inputs {
             let disabled_name = format!("{}.merged_backup", v.file_name);
             let disabled_path = v.file_path.with_file_name(disabled_name);
-            let _ = fs::rename(&v.file_path, disabled_path);
+            let result = if disabled_path.exists() {
+                crate::bess::replace_file(&v.file_path, &disabled_path)
+            } else {
+                fs::rename(&v.file_path, disabled_path).map_err(|e| e.to_string())
+            };
+            result.map_err(|e| {
+                format!(
+                    "Merged archive saved but could not disable {}: {e}",
+                    v.file_name
+                )
+            })?;
         }
 
         Ok(output_path)
@@ -297,43 +357,102 @@ impl Merger {
 
     /// Unmerges/Degroups a chassis mod: restores original variant ZIPs and removes the merged mod.
     pub fn unmerge_chassis(chassis_name: &str, mods_dir: &Path) -> Result<(), String> {
+        let _lock = crate::bess::ModsLock::acquire(mods_dir)?;
         let chassis_slug = slugify(chassis_name);
         let backup_dir = mods_dir.join(".babm_backup").join(&chassis_slug);
         let manifest_path = backup_dir.join("manifest.json");
+        crate::bess::no_links(&manifest_path)?;
 
         if !manifest_path.is_file() {
             return Err(format!("No merge manifest found for {}", chassis_name));
         }
 
         let manifest_data = fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?;
-        let manifest: MergeManifest = serde_json::from_str(&manifest_data)
-            .map_err(|e| format!("Corrupted manifest: {e}"))?;
+        let manifest: MergeManifest =
+            serde_json::from_str(&manifest_data).map_err(|e| format!("Corrupted manifest: {e}"))?;
 
-        // 1. Remove merged zip
-        let merged_zip_path = mods_dir.join(&manifest.merged_mod_file);
-        if merged_zip_path.is_file() {
-            fs::remove_file(&merged_zip_path)
-                .map_err(|e| format!("Cannot remove {}: {e}", merged_zip_path.display()))?;
+        // Validate every restoration source before changing the active pack.
+        if !crate::bess::safe_leaf(&manifest.merged_mod_file) {
+            return Err("Unsafe merged archive path".into());
         }
-
-        // 2. Restore original files
-        for backup in manifest.original_files {
+        let merged_zip_path = mods_dir.join(&manifest.merged_mod_file);
+        crate::bess::no_links(&merged_zip_path)?;
+        if !merged_zip_path.is_file() {
+            return Err("The merged archive is missing".into());
+        }
+        let mut restore = Vec::new();
+        let mut names = HashSet::new();
+        for backup in &manifest.original_files {
+            if !crate::bess::safe_leaf(&backup.original_filename)
+                || !crate::bess::safe_leaf(&backup.backup_filename)
+                || !names.insert(backup.original_filename.clone())
+            {
+                return Err("Unsafe or duplicate original filename".into());
+            }
+            let destination = mods_dir.join(&backup.original_filename);
+            if destination.exists() {
+                return Err(format!(
+                    "An original already exists: {}",
+                    destination.display()
+                ));
+            }
             let backup_file = backup_dir.join(&backup.backup_filename);
-            let disabled_file = backup.original_path.with_file_name(format!("{}.merged_backup", backup.original_filename));
-
-            if disabled_file.is_file() {
-                // If .merged_backup exists in mods dir, rename back
-                let _ = fs::rename(&disabled_file, &backup.original_path);
-            } else if backup_file.is_file() {
-                // Otherwise copy from backup dir
-                let _ = fs::copy(&backup_file, &backup.original_path);
+            let disabled_file =
+                mods_dir.join(format!("{}.merged_backup", backup.original_filename));
+            let source = if disabled_file.is_file() {
+                disabled_file
+            } else {
+                backup_file
+            };
+            if !source.is_file() {
+                return Err(format!(
+                    "Original backup is missing: {}",
+                    backup.original_filename
+                ));
+            }
+            let hash = crate::bess::sha256_file(&source)?;
+            restore.push((source, destination, hash));
+        }
+        let mut staged = Vec::new();
+        let mut restored = Vec::new();
+        let result = (|| {
+            for (source, destination, hash) in &restore {
+                let temporary = crate::bess::unique_path(mods_dir, ".babm-restore", "tmp");
+                staged.push((temporary.clone(), destination.clone()));
+                let mut input = File::open(source).map_err(|e| e.to_string())?;
+                let mut out = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&temporary)
+                    .map_err(|e| e.to_string())?;
+                std::io::copy(&mut input, &mut out).map_err(|e| e.to_string())?;
+                out.sync_all().map_err(|e| e.to_string())?;
+                drop(out);
+                if crate::bess::sha256_file(&temporary)? != *hash {
+                    return Err("Original restoration verification failed".into());
+                }
+            }
+            for (temporary, destination) in &staged {
+                fs::rename(temporary, destination).map_err(|e| e.to_string())?;
+                restored.push(destination.clone());
+            }
+            // Retain the pack and all original snapshots for recovery. No
+            // sound/variable changes are discarded by deleting the backup tree.
+            let archived = crate::bess::unique_path(&backup_dir, "before-unmerge", "zip");
+            fs::rename(&merged_zip_path, archived).map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        for (temporary, _) in staged {
+            if temporary.exists() {
+                let _ = fs::remove_file(temporary);
             }
         }
-
-        // 3. Clean up backup directory
-        let _ = fs::remove_dir_all(&backup_dir);
-
-        Ok(())
+        if result.is_err() {
+            for destination in restored {
+                let _ = fs::remove_file(destination);
+            }
+        }
+        result
     }
 
     /// Isolates a single variant into a standalone Automation ZIP suitable for BESS synthesis.
@@ -341,11 +460,11 @@ impl Merger {
         variant_zip: &Path,
         output_dir: &Path,
     ) -> Result<PathBuf, String> {
-        // If variant_zip is already an original variant zip, verify it works for BESS
-        if !variant_zip.is_file() {
-            return Err("File not found".into());
-        }
-        let out_file = output_dir.join(format!("bess_ready_{}", variant_zip.file_name().unwrap().to_string_lossy()));
+        crate::bess::validate_single_source(variant_zip)?;
+        let out_file = output_dir.join(format!(
+            "bess_ready_{}",
+            variant_zip.file_name().unwrap().to_string_lossy()
+        ));
         fs::copy(variant_zip, &out_file).map_err(|e| e.to_string())?;
         Ok(out_file)
     }
@@ -420,7 +539,9 @@ pub fn tag_jbeam_part_names(text: &str, trim_name: &str, is_bess: bool) -> Strin
                         i += "\"name\"".len();
 
                         // Consume whitespace and `:`
-                        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b':') {
+                        while i < bytes.len()
+                            && (bytes[i].is_ascii_whitespace() || bytes[i] == b':')
+                        {
                             result.push(bytes[i] as char);
                             i += 1;
                         }
@@ -515,4 +636,3 @@ mod tests {
         assert!(tagged_bess.contains("\"name\": \"A 4-Speed Manual Transmission [A] [BESS]\""));
     }
 }
-
