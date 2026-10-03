@@ -51,9 +51,12 @@ impl Grouper {
             let slug = slugify(&chassis_name);
 
             // Check if there is already a merged mod
-            let is_merged = variants
-                .iter()
-                .any(|v| v.file_name.starts_with("babm_") || v.configs.len() > 1);
+            let is_merged = variants.iter().any(|v| {
+                v.file_name.starts_with("babm_")
+                    || (v.configs.len() > 1
+                        && !crate::bess::read_variant_marker(&v.file_path)
+                            .is_ok_and(|m| m.is_some()))
+            });
 
             result.push(ChassisGroup {
                 chassis_name,

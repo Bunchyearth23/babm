@@ -9,6 +9,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
+mod variants;
+pub use variants::{VariantMarker, read_variant_marker};
+pub(crate) use variants::{merge_variant_state, variant_file_paths, verify_variant_originals};
+
 pub const MARKER: &str = "bess-export.json";
 const STATE: &str = "babm-bess-updates.json";
 const MAX_ENTRIES: usize = 30_000;
@@ -37,6 +41,8 @@ pub struct ExportMarker {
 #[serde(rename_all = "snake_case")]
 pub enum UpdateStatus {
     Ready,
+    VariantReady,
+    VariantInstalled,
     AlreadyApplied,
     Stale,
     Conflict,
@@ -50,6 +56,7 @@ pub struct BessUpdate {
     pub target_path: Option<PathBuf>,
     pub exported_at_unix_ms: u64,
     pub sounds: usize,
+    pub selectable_variant: bool,
     pub status: UpdateStatus,
     pub detail: String,
 }
@@ -192,7 +199,13 @@ pub fn read_marker(path: &Path) -> Result<Option<ExportMarker>, String> {
     if !z.file_names().any(|n| n == MARKER) {
         return Ok(None);
     }
-    let marker: ExportMarker = read_json(&mut z, MARKER)?;
+    let value: serde_json::Value = read_json(&mut z, MARKER)?;
+    if value["kind"] == variants::KIND {
+        drop(z);
+        read_variant_marker(path)?;
+        return Ok(None);
+    }
+    let marker: ExportMarker = serde_json::from_value(value).map_err(|e| e.to_string())?;
     let root = marker
         .vehicle_root
         .strip_prefix("vehicles/")
@@ -319,9 +332,16 @@ fn find_target(mods_dir: &Path, marker: &ExportMarker) -> Result<Target, String>
             if let Some(source) = original_backup(mods_dir, &folder, item) {
                 let hash = sha256_file(&source)?;
                 let source_marker = read_marker(&source)?;
-                let identity = source_marker
+                let variant_marker = read_variant_marker(&source)?;
+                let identity = variant_marker
                     .as_ref()
-                    .map_or(hash.as_str(), |m| m.source_archive_sha256.as_str());
+                    .map(|m| m.source_archive_sha256.as_str())
+                    .or_else(|| {
+                        source_marker
+                            .as_ref()
+                            .map(|m| m.source_archive_sha256.as_str())
+                    })
+                    .unwrap_or(hash.as_str());
                 if identity == marker.source_archive_sha256 {
                     matched = true;
                     if source_marker.as_ref().is_some_and(|m| {
@@ -370,9 +390,16 @@ fn find_target(mods_dir: &Path, marker: &ExportMarker) -> Result<Target, String>
         }
         let hash = sha256_file(&path)?;
         let source_marker = read_marker(&path)?;
-        let identity = source_marker
+        let variant_marker = read_variant_marker(&path)?;
+        let identity = variant_marker
             .as_ref()
-            .map_or(hash.as_str(), |m| m.source_archive_sha256.as_str());
+            .map(|m| m.source_archive_sha256.as_str())
+            .or_else(|| {
+                source_marker
+                    .as_ref()
+                    .map(|m| m.source_archive_sha256.as_str())
+            })
+            .unwrap_or(hash.as_str());
         if identity == marker.source_archive_sha256 {
             if targets.iter().any(|t| t.path == path) {
                 continue;
@@ -519,6 +546,7 @@ fn prepare(mods_dir: &Path, export_path: &Path) -> Result<Plan, String> {
         .unwrap_or("Vehicle")
         .to_string();
     let update = BessUpdate {
+        selectable_variant: false,
         export_path: export_path.to_path_buf(),
         vehicle_name,
         target_path: Some(target.path.clone()),
@@ -540,6 +568,9 @@ fn prepare(mods_dir: &Path, export_path: &Path) -> Result<Plan, String> {
 }
 
 pub fn inspect_update(mods_dir: &Path, export_path: &Path) -> Result<BessUpdate, String> {
+    if let Some(marker) = read_variant_marker(export_path)? {
+        return variants::inspect(mods_dir, export_path, &marker);
+    }
     match prepare(mods_dir, export_path) {
         Ok(plan) => Ok(plan.update),
         Err(reason) => {
@@ -549,6 +580,7 @@ pub fn inspect_update(mods_dir: &Path, export_path: &Path) -> Result<BessUpdate,
             };
             let unavailable = reason.starts_with("No installed original");
             Ok(BessUpdate {
+                selectable_variant: false,
                 export_path: export_path.to_path_buf(),
                 vehicle_name: marker
                     .vehicle_root
@@ -615,10 +647,31 @@ pub fn discover(mods_dir: &Path, exports_dir: Option<&Path>) -> Result<Vec<BessU
     let mut found: Vec<(ExportMarker, BessUpdate)> = Vec::new();
     let mut invalid = Vec::new();
     for path in candidates {
+        match read_variant_marker(&path) {
+            Ok(Some(marker)) => {
+                invalid.push(variants::inspect(mods_dir, &path, &marker)?);
+                continue;
+            }
+            Err(error) => {
+                invalid.push(BessUpdate {
+                    selectable_variant: true,
+                    export_path: path,
+                    vehicle_name: "Invalid BESS variant".into(),
+                    target_path: None,
+                    exported_at_unix_ms: 0,
+                    sounds: 0,
+                    status: UpdateStatus::Conflict,
+                    detail: error,
+                });
+                continue;
+            }
+            Ok(None) => {}
+        }
         match read_marker(&path) {
             Ok(Some(marker)) => found.push((marker, inspect_update(mods_dir, &path)?)),
             Ok(None) => {}
             Err(error) => invalid.push(BessUpdate {
+                selectable_variant: false,
                 export_path: path,
                 vehicle_name: "Invalid BESS export".into(),
                 target_path: None,
@@ -810,6 +863,9 @@ pub(crate) fn replace_file(staged: &Path, target: &Path) -> Result<(), String> {
 
 pub fn apply_update(mods_dir: &Path, export_path: &Path) -> Result<ApplyReceipt, String> {
     let _lock = ModsLock::acquire(mods_dir)?;
+    if let Some(marker) = read_variant_marker(export_path)? {
+        return variants::import(mods_dir, export_path, marker);
+    }
     let mut plan = prepare(mods_dir, export_path)?;
     if plan.update.status != UpdateStatus::Ready {
         return Err(plan.update.detail);
@@ -957,25 +1013,26 @@ pub fn sources_for_bess(mods_dir: &Path, vehicle_zip: &Path) -> Result<Vec<PathB
         }
         grouped = true;
         for item in &manifest.original_files {
-            if item.original_filename.starts_with("bess-variant-") {
-                continue;
-            }
-            if let Some(path) = original_backup(mods_dir, folder, item)
-                && validate_single_source(&path).is_ok()
-            {
-                if let Some(marker) = read_marker(&path)? {
+            if let Some(path) = original_backup(mods_dir, folder, item) {
+                if let Some(marker) = read_variant_marker(&path)? {
                     wanted.insert(marker.source_archive_sha256);
-                } else {
+                } else if let Some(marker) = read_marker(&path)? {
+                    wanted.insert(marker.source_archive_sha256);
+                } else if !item.original_filename.starts_with("bess-variant-")
+                    && validate_single_source(&path).is_ok()
+                {
                     sources.push(path);
                 }
             }
         }
     }
     if !grouped {
-        validate_single_source(vehicle_zip)?;
-        if let Some(marker) = read_marker(vehicle_zip)? {
+        if let Some(marker) = read_variant_marker(vehicle_zip)? {
+            wanted.insert(marker.source_archive_sha256);
+        } else if let Some(marker) = read_marker(vehicle_zip)? {
             wanted.insert(marker.source_archive_sha256);
         } else {
+            validate_single_source(vehicle_zip)?;
             sources.push(vehicle_zip.to_path_buf());
         }
     }
@@ -1044,25 +1101,44 @@ pub(crate) fn validate_single_source(path: &Path) -> Result<(), String> {
 pub fn prefer_bess_variants(
     variants: &[crate::vehicle::VehicleMod],
 ) -> Result<Vec<crate::vehicle::VehicleMod>, String> {
-    let mut selected: BTreeMap<String, (crate::vehicle::VehicleMod, Option<ExportMarker>)> =
-        BTreeMap::new();
+    type InputRevision = (u8, u64, String);
+    type SelectedInput = (crate::vehicle::VehicleMod, Option<InputRevision>);
+    let mut selected: BTreeMap<String, SelectedInput> = BTreeMap::new();
+    let mut selectable_sources = BTreeSet::new();
     for vehicle in variants {
         let marker = read_marker(&vehicle.file_path)?;
-        let identity = match &marker {
-            Some(m) => m.source_archive_sha256.clone(),
-            None => sha256_file(&vehicle.file_path)?,
+        let variant = read_variant_marker(&vehicle.file_path)?;
+        let (identity, revision) = match (&variant, &marker) {
+            (Some(m), _) => {
+                selectable_sources.insert(m.source_archive_sha256.clone());
+                (
+                    format!("{}:{}", m.source_archive_sha256, m.variant_id),
+                    Some((
+                        2,
+                        m.exported_at_unix_ms,
+                        serde_json::to_string(&m.added_files).map_err(|e| e.to_string())?,
+                    )),
+                )
+            }
+            (_, Some(m)) => (
+                m.source_archive_sha256.clone(),
+                Some((
+                    1,
+                    m.exported_at_unix_ms,
+                    serde_json::to_string(&m.sounds).map_err(|e| e.to_string())?,
+                )),
+            ),
+            _ => (sha256_file(&vehicle.file_path)?, None),
         };
         if let Some((old, old_marker)) = selected.get(&identity) {
-            match (&marker, old_marker) {
+            match (&revision, old_marker) {
                 (Some(new), Some(previous)) => {
-                    if new.exported_at_unix_ms == previous.exported_at_unix_ms
-                        && new.sounds != previous.sounds
-                    {
+                    if new.0 == previous.0 && new.1 == previous.1 && new.2 != previous.2 {
                         return Err(
                             "Conflicting BESS revisions for the same original vehicle".into()
                         );
                     }
-                    if new.exported_at_unix_ms <= previous.exported_at_unix_ms {
+                    if (new.0, new.1) <= (previous.0, previous.1) {
                         continue;
                     }
                 }
@@ -1071,9 +1147,13 @@ pub fn prefer_bess_variants(
                 _ => {}
             }
         }
-        selected.insert(identity, (vehicle.clone(), marker));
+        selected.insert(identity, (vehicle.clone(), revision));
     }
-    let mut result: Vec<_> = selected.into_values().map(|(vehicle, _)| vehicle).collect();
+    let mut result: Vec<_> = selected
+        .into_iter()
+        .filter(|(identity, _)| !selectable_sources.contains(identity))
+        .map(|(_, (vehicle, _))| vehicle)
+        .collect();
     result.sort_by(|a, b| {
         a.display_name
             .to_lowercase()
@@ -1122,7 +1202,9 @@ pub(crate) fn merge_inputs(
         .collect();
     let mut identities = BTreeSet::new();
     for v in variants {
-        if let Some(m) = read_marker(&v.file_path)? {
+        if let Some(m) = read_variant_marker(&v.file_path)? {
+            identities.insert(m.source_archive_sha256);
+        } else if let Some(m) = read_marker(&v.file_path)? {
             identities.insert(m.source_archive_sha256);
         }
     }
@@ -1132,9 +1214,10 @@ pub(crate) fn merge_inputs(
                 continue;
             }
             let marker = read_marker(&path)?;
-            let identity = match marker {
-                Some(m) => m.source_archive_sha256,
-                None => sha256_file(&path)?,
+            let identity = match (read_variant_marker(&path)?, marker) {
+                (Some(m), _) => m.source_archive_sha256,
+                (_, Some(m)) => m.source_archive_sha256,
+                _ => sha256_file(&path)?,
             };
             if identities.contains(&identity) {
                 result.insert(path.clone(), crate::scanner::inspect_vehicle_zip(&path)?);

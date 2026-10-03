@@ -232,7 +232,10 @@ impl BabmApp {
             && !self.bess_applying
             && !self.bess_scanning
             && self.running_chassis_tasks.is_empty()
-            && update.status == UpdateStatus::Ready
+            && matches!(
+                update.status,
+                UpdateStatus::Ready | UpdateStatus::VariantReady
+            )
     }
 
     fn apply_bess_export(&mut self, update: BessUpdate) {
@@ -245,7 +248,7 @@ impl BabmApp {
         let tx = self.task_tx.clone();
         self.bess_applying = true;
         self.status_message = Some((
-            format!("Applying BESS sounds for {}...", update.vehicle_name),
+            format!("Importing BESS export for {}...", update.vehicle_name),
             false,
         ));
         std::thread::spawn(move || {
@@ -321,7 +324,7 @@ impl eframe::App for BabmApp {
                         Ok(path) => {
                             self.status_message = Some((
                                 format!(
-                                    "BESS sounds applied. Backup preserved. {}",
+                                    "BESS export imported. Backup preserved. {}",
                                     path.display()
                                 ),
                                 false,
@@ -477,7 +480,10 @@ impl eframe::App for BabmApp {
                         "BESS sounds ({})",
                         self.bess_updates
                             .iter()
-                            .filter(|u| u.status == UpdateStatus::Ready)
+                            .filter(|u| matches!(
+                                u.status,
+                                UpdateStatus::Ready | UpdateStatus::VariantReady
+                            ))
                             .count()
                     ),
                 );
@@ -519,10 +525,10 @@ impl eframe::App for BabmApp {
 impl BabmApp {
     fn render_bess_tab(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("BESS sound updates");
-            ui.label("Edit an original variant in BESS, export its complete vehicle ZIP, then apply its sounds here.");
-            ui.label("Grouped vehicles keep their other variants and settings. A backup is kept before each update.");
-            ui.label("The original trim receives these sounds. Older BESS add-on configurations keep their own sounds.");
+            ui.heading("BESS variants and sound updates");
+            ui.label("Import a complete BESS vehicle export to add its separate BESS configuration. The original configuration and sounds stay available.");
+            ui.label("BABM handles grouped vehicles and keeps a backup before importing. Existing variants and settings are preserved.");
+            ui.label("Older replacement exports still update the original trim's sound.");
             ui.horizontal(|ui| {
                 let label = self.bess_exports_dir.as_ref().map(|p| p.display().to_string())
                     .unwrap_or_else(|| "Automatic: BESS saved export folder and nearby BESS-exports".to_string());
@@ -547,7 +553,7 @@ impl BabmApp {
                 ui.horizontal(|ui| { ui.spinner(); ui.label("Checking BESS exports and their targets..."); });
             }
             if self.bess_applying {
-                ui.horizontal(|ui| { ui.spinner(); ui.label("Applying sounds and preserving the previous archive..."); });
+                ui.horizontal(|ui| { ui.spinner(); ui.label("Importing BESS export and preserving the previous archive..."); });
             }
             if let Some(error) = &self.bess_scan_error {
                 ui.colored_label(Color32::LIGHT_RED, error);
@@ -567,13 +573,16 @@ impl BabmApp {
                                 ui.label(RichText::new(&update.vehicle_name).strong());
                                 let (label, color) = match update.status {
                                     UpdateStatus::Ready => ("Ready to apply", Color32::LIGHT_GREEN),
+                                    UpdateStatus::VariantReady => ("Ready to import variant", Color32::LIGHT_GREEN),
+                                    UpdateStatus::VariantInstalled => ("Variant already installed", Color32::GRAY),
                                     UpdateStatus::AlreadyApplied => ("Already applied", Color32::GRAY),
                                     UpdateStatus::Stale => ("Older export", Color32::GRAY),
                                     UpdateStatus::Conflict => ("Needs attention", Color32::LIGHT_RED),
                                     UpdateStatus::Unavailable => ("Target unavailable", Color32::YELLOW),
                                 };
                                 ui.colored_label(color, label);
-                                if ui.add_enabled(self.can_apply_bess_update(&update), egui::Button::new("Apply BESS sounds")).clicked() {
+                                let action = if update.selectable_variant { "Import BESS variant" } else { "Apply BESS sounds" };
+                                if ui.add_enabled(self.can_apply_bess_update(&update), egui::Button::new(action)).clicked() {
                                     self.apply_bess_export(update.clone());
                                 }
                             });
@@ -1111,6 +1120,7 @@ mod tests {
 
     fn update(name: &str) -> BessUpdate {
         BessUpdate {
+            selectable_variant: false,
             export_path: PathBuf::from(format!("{name}.zip")),
             vehicle_name: name.to_string(),
             target_path: None,
@@ -1162,14 +1172,17 @@ mod tests {
             UpdateStatus::Stale,
             UpdateStatus::Conflict,
             UpdateStatus::Unavailable,
+            UpdateStatus::VariantReady,
+            UpdateStatus::VariantInstalled,
         ]
         .into_iter()
         .enumerate()
         {
             let mut item = update(&format!("vehicle-{index}"));
             item.status = status;
+            item.selectable_variant = index >= 5;
             item.target_path = Some(PathBuf::from(format!("mods/target-{index}.zip")));
-            assert_eq!(app.can_apply_bess_update(&item), index == 0);
+            assert_eq!(app.can_apply_bess_update(&item), index == 0 || index == 5);
             app.bess_updates.push(item);
         }
         let context = egui::Context::default();
@@ -1177,7 +1190,7 @@ mod tests {
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
-                    egui::vec2(1400.0, 1200.0),
+                    egui::vec2(1400.0, 1600.0),
                 )),
                 ..Default::default()
             },
@@ -1202,16 +1215,19 @@ mod tests {
             texts(&shape.shape, &mut rendered);
         }
         for label in [
-            "BESS sound updates",
+            "BESS variants and sound updates",
             "Ready to apply",
             "Already applied",
             "Older export",
             "Needs attention",
             "Target unavailable",
+            "Ready to import variant",
+            "Variant already installed",
         ] {
             assert!(rendered.contains(label), "Missing {label}: {rendered}");
         }
         assert_eq!(rendered.matches("Apply BESS sounds").count(), 5);
+        assert_eq!(rendered.matches("Import BESS variant").count(), 2);
         assert!(rendered.contains("mods/target-0.zip"));
         app.bess_applying = true;
         assert!(!app.can_apply_bess_update(&app.bess_updates[0]));

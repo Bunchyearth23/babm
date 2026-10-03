@@ -40,6 +40,7 @@ impl Merger {
 
         let _lock = crate::bess::ModsLock::acquire(mods_dir)?;
         let all_inputs = crate::bess::merge_inputs(variants, mods_dir)?;
+        crate::bess::verify_variant_originals(&all_inputs, mods_dir)?;
         let preferred = crate::bess::prefer_bess_variants(&all_inputs)?;
         let variants = preferred.as_slice();
 
@@ -53,6 +54,7 @@ impl Merger {
             );
         }
         crate::bess::check_merge_audio(variants, &chassis_slug)?;
+        let variant_state = crate::bess::merge_variant_state(variants, &chassis_slug)?;
         let staged_output = crate::bess::unique_path(mods_dir, ".babm-merge", "tmp");
 
         let backup_dir = mods_dir.join(".babm_backup").join(&chassis_slug);
@@ -109,6 +111,8 @@ impl Merger {
 
             let old_vehicle_prefix = format!("vehicles/{}/", v.internal_name);
             let new_vehicle_prefix = format!("vehicles/{}/", chassis_slug);
+            let selectable = crate::bess::read_variant_marker(&v.file_path)?;
+            let selectable_files = crate::bess::variant_file_paths(&v.file_path)?;
 
             if variant_idx == 0 {
                 first_author = v.author.clone();
@@ -144,7 +148,9 @@ impl Merger {
                 let original_name = entry.name().to_string();
                 // Export provenance belongs to one original, not the combined
                 // vehicle; source backups retain the complete marker.
-                if original_name == crate::bess::MARKER || original_name == "babm-bess-updates.json"
+                if original_name == crate::bess::MARKER
+                    || original_name == "babm-bess-updates.json"
+                    || original_name == "babm-bess-variants.json"
                 {
                     continue;
                 }
@@ -235,8 +241,14 @@ impl Merger {
                         if new_entry_name.ends_with(".jbeam")
                             && !new_entry_name.ends_with("camso_core.jbeam")
                         {
+                            let part_is_bess =
+                                if selectable.is_some() || !selectable_files.is_empty() {
+                                    selectable_files.contains(&original_name)
+                                } else {
+                                    is_bess
+                                };
                             modified_text =
-                                tag_jbeam_part_names(&modified_text, &trim_name, is_bess);
+                                tag_jbeam_part_names(&modified_text, &trim_name, part_is_bess);
                         }
 
                         zip_writer
@@ -257,6 +269,13 @@ impl Merger {
                 std::io::copy(&mut entry, &mut zip_writer).map_err(|e| e.to_string())?;
                 written_entries.insert(new_entry_name);
             }
+        }
+
+        if let Some(state) = variant_state {
+            zip_writer
+                .start_file("babm-bess-variants.json", options)
+                .map_err(|e| e.to_string())?;
+            zip_writer.write_all(&state).map_err(|e| e.to_string())?;
         }
 
         // 3. Write unified info.json
