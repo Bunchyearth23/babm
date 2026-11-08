@@ -1,6 +1,6 @@
 //! BESS full-vehicle interchange. Discovery is read-only; applying replaces only
 //! the declared audio entries and this module's revision metadata.
-use crate::merger::MergeManifest;
+use crate::merger::{MergeManifest, remap::MergeRemap};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -86,8 +86,17 @@ struct AppliedSource {
 struct Target {
     path: PathBuf,
     chassis: Option<String>,
-    other_sources: Vec<PathBuf>,
+    remap: MergeRemap,
+    other_sources: Vec<(PathBuf, MergeRemap)>,
     baseline: Option<ExportMarker>,
+}
+
+impl Target {
+    fn mapped_path(&self, path: &str) -> String {
+        self.chassis
+            .as_deref()
+            .map_or_else(|| path.to_owned(), |chassis| self.remap.path(path, chassis))
+    }
 }
 
 struct Plan {
@@ -105,7 +114,7 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
     hash_reader(File::open(path).map_err(|e| e.to_string())?)
 }
 
-fn hash_reader(mut reader: impl Read) -> Result<String, String> {
+pub(crate) fn hash_reader(mut reader: impl Read) -> Result<String, String> {
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 65536];
     loop {
@@ -167,7 +176,7 @@ pub(crate) fn safe_leaf(value: &str) -> bool {
     safe_member(value) && !value.contains('/')
 }
 
-fn archive(path: &Path) -> Result<ZipArchive<File>, String> {
+pub(crate) fn archive(path: &Path) -> Result<ZipArchive<File>, String> {
     no_links(path)?;
     let z =
         ZipArchive::new(File::open(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -352,7 +361,7 @@ fn find_target(mods_dir: &Path, marker: &ExportMarker) -> Result<Target, String>
                         baseline = source_marker;
                     }
                 } else {
-                    others.push(source);
+                    others.push((source, identity.to_owned()));
                 }
             } else {
                 incomplete = true;
@@ -368,6 +377,14 @@ fn find_target(mods_dir: &Path, marker: &ExportMarker) -> Result<Target, String>
             let standalone = folder.file_name().is_some_and(|n| {
                 n == format!("bess-original-{}", marker.source_archive_sha256).as_str()
             });
+            let mut pack = archive(&target)?;
+            let remap_state = crate::merger::remap::STATE;
+            let remaps: BTreeMap<String, MergeRemap> =
+                if pack.file_names().any(|name| name == remap_state) {
+                    read_json(&mut pack, remap_state)?
+                } else {
+                    BTreeMap::new()
+                };
             targets.push(Target {
                 path: target,
                 chassis: if standalone {
@@ -375,7 +392,16 @@ fn find_target(mods_dir: &Path, marker: &ExportMarker) -> Result<Target, String>
                 } else {
                     Some(manifest.chassis_slug)
                 },
-                other_sources: others,
+                remap: remaps
+                    .get(&marker.source_archive_sha256)
+                    .cloned()
+                    .unwrap_or_default(),
+                other_sources: others
+                    .into_iter()
+                    .map(|(path, identity)| {
+                        (path, remaps.get(&identity).cloned().unwrap_or_default())
+                    })
+                    .collect(),
                 baseline,
             });
         }
@@ -407,6 +433,7 @@ fn find_target(mods_dir: &Path, marker: &ExportMarker) -> Result<Target, String>
             targets.push(Target {
                 path,
                 chassis: None,
+                remap: MergeRemap::default(),
                 other_sources: Vec::new(),
                 baseline: source_marker,
             });
@@ -419,6 +446,7 @@ fn find_target(mods_dir: &Path, marker: &ExportMarker) -> Result<Target, String>
     }
 }
 
+#[cfg(test)]
 fn mapped_path(path: &str, root: &str, chassis: Option<&str>) -> String {
     match (path.strip_prefix(root), chassis) {
         (Some(rest), Some(chassis)) => format!("vehicles/{chassis}/{rest}"),
@@ -451,12 +479,7 @@ fn prepare(mods_dir: &Path, export_path: &Path) -> Result<Plan, String> {
         sounds: m
             .sounds
             .iter()
-            .map(|s| {
-                (
-                    mapped_path(&s.path, &m.vehicle_root, target.chassis.as_deref()),
-                    s.rendered_sha256.clone(),
-                )
-            })
+            .map(|s| (target.mapped_path(&s.path), s.rendered_sha256.clone()))
             .collect(),
     });
     let previous = applied
@@ -465,33 +488,23 @@ fn prepare(mods_dir: &Path, export_path: &Path) -> Result<Plan, String> {
         .or(baseline.as_ref());
     let mut replacements = BTreeMap::new();
     for sound in &marker.sounds {
-        let path = mapped_path(&sound.path, &marker.vehicle_root, target.chassis.as_deref());
+        let path = target.mapped_path(&sound.path);
         if replacements.insert(path, sound.clone()).is_some() {
             return Err("Conflicting mapped sounds".into());
         }
     }
     // A global audio resource may belong to several trims. Replacing it would
     // alter another variant, so require a unique owner instead of first-wins.
-    for source in &target.other_sources {
+    for (source, remap) in &target.other_sources {
         let other = archive(source)?;
-        let roots: BTreeSet<String> = other
-            .file_names()
-            .filter_map(|name| {
-                let rest = name.strip_prefix("vehicles/")?;
-                Some(format!("vehicles/{}/", rest.split('/').next()?))
-            })
-            .collect();
         for name in other
             .file_names()
             .filter(|n| n.to_ascii_lowercase().ends_with(".wav"))
         {
-            let mapped = roots
-                .iter()
-                .find(|r| name.starts_with(r.as_str()))
-                .map_or_else(
-                    || name.to_string(),
-                    |root| mapped_path(name, root, target.chassis.as_deref()),
-                );
+            let mapped = target
+                .chassis
+                .as_deref()
+                .map_or_else(|| name.to_owned(), |chassis| remap.path(name, chassis));
             if replacements.contains_key(&mapped) {
                 return Err(format!("Shared sound belongs to another variant: {mapped}"));
             }
@@ -1163,35 +1176,6 @@ pub fn prefer_bess_variants(
     Ok(result)
 }
 
-pub(crate) fn check_merge_audio(
-    variants: &[crate::vehicle::VehicleMod],
-    chassis: &str,
-) -> Result<(), String> {
-    let mut sounds = BTreeMap::new();
-    for vehicle in variants {
-        let mut z = archive(&vehicle.file_path)?;
-        for i in 0..z.len() {
-            let entry = z.by_index(i).map_err(|e| e.to_string())?;
-            if !entry.name().to_ascii_lowercase().ends_with(".wav") {
-                continue;
-            }
-            let name = mapped_path(
-                entry.name(),
-                &format!("vehicles/{}/", vehicle.internal_name),
-                Some(chassis),
-            );
-            let hash = hash_reader(entry)?;
-            if sounds.get(&name).is_some_and(|old| old != &hash) {
-                return Err(format!(
-                    "Different variants share conflicting audio at {name}; no archive was changed"
-                ));
-            }
-            sounds.insert(name, hash);
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn merge_inputs(
     variants: &[crate::vehicle::VehicleMod],
     mods_dir: &Path,
@@ -1579,7 +1563,7 @@ mod tests {
         assert!(!mods.join(".babm_backup").exists());
     }
     #[test]
-    fn new_merge_prefers_processed_original_and_rejects_audio_collisions() {
+    fn new_merge_prefers_processed_original() {
         let t = Temp::new();
         let source = original(&t.0, "first", "art/shared.wav");
         let export = exported(
@@ -1595,9 +1579,6 @@ mod tests {
         let selected = prefer_bess_variants(&[a, b.clone()]).unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].file_path, b.file_path);
-        let second = original(&t.0, "second", "art/shared.wav");
-        let c = crate::scanner::inspect_vehicle_zip(&second).unwrap();
-        assert!(check_merge_audio(&[b, c], "model").is_err());
     }
     #[test]
     fn source_list_uses_original_backups_and_rejects_grouped_isolation() {
@@ -1657,7 +1638,10 @@ mod tests {
         apply_update(&mods, &second).unwrap();
         assert_eq!(contents(&source)["art/engine.wav"], b"new2");
         let marker = read_marker(&source).unwrap().unwrap();
-        assert_eq!(marker.source_archive_name, "first.zip");
+        assert_eq!(
+            marker.source_archive_name,
+            sources[0].file_name().unwrap().to_str().unwrap()
+        );
         assert_eq!(marker.blend_path, "vehicles/first/sound.sfxBlend2D.json");
         assert_eq!(sha256_file(&sources[0]).unwrap(), pristine);
     }

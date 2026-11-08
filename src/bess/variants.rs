@@ -233,13 +233,14 @@ pub(crate) fn verify_variant_originals(
 
 pub(crate) fn merge_variant_state(
     vehicles: &[crate::vehicle::VehicleMod],
+    remaps: &[MergeRemap],
     chassis: &str,
 ) -> Result<Option<Vec<u8>>, String> {
     let mut merged = Registry {
         version: 1,
         ..Default::default()
     };
-    for vehicle in vehicles {
+    for (vehicle, remap) in vehicles.iter().zip(remaps) {
         let mut z = archive(&vehicle.file_path)?;
         let mut state = registry(&mut z)?;
         if let Some(marker) = read_variant_marker(&vehicle.file_path)? {
@@ -290,18 +291,17 @@ pub(crate) fn merge_variant_state(
                 if format!("{:x}", Sha256::digest(&bytes)) != expected {
                     return Err(format!("BESS variant changed before merging: {name}"));
                 }
-                let target = mapped_path(&name, &root, Some(chassis));
-                if [".jbeam", ".pc", ".json"]
+                let target = remap.path(&name, chassis);
+                if [".jbeam", ".pc", ".json", ".lua", ".dae"]
                     .iter()
-                    .any(|ext| name.ends_with(ext))
+                    .any(|ext| name.ends_with(ext) && (*ext != ".dae" || remap.has_rules()))
                 {
-                    let mut text = String::from_utf8(bytes)
-                        .map_err(|e| e.to_string())?
-                        .replace(&root, &format!("vehicles/{chassis}/"));
-                    if name.ends_with(".jbeam") {
-                        text = crate::merger::tag_jbeam_part_names(&text, &trim, true);
+                    bytes = remap.text(&bytes, &root, chassis);
+                    if name.ends_with(".jbeam")
+                        && let Ok(text) = std::str::from_utf8(&bytes)
+                    {
+                        bytes = crate::merger::tag_jbeam_part_names(text, &trim, true).into_bytes();
                     }
-                    bytes = text.into_bytes();
                 }
                 files.insert(target, format!("{:x}", Sha256::digest(&bytes)));
             }
@@ -332,10 +332,14 @@ fn payload(
     marker: &VariantMarker,
     export: &mut ZipArchive<File>,
     chassis: Option<&str>,
+    remap: &MergeRemap,
 ) -> Result<BTreeMap<String, Vec<u8>>, String> {
     let mut result = BTreeMap::new();
     for file in &marker.added_files {
-        let path = mapped_path(&file.path, &marker.vehicle_root, chassis);
+        let path = chassis.map_or_else(
+            || file.path.clone(),
+            |chassis| remap.path(&file.path, chassis),
+        );
         let mut bytes = Vec::new();
         export
             .by_name(&file.path)
@@ -347,11 +351,8 @@ fn payload(
                 .iter()
                 .any(|ext| path.ends_with(ext))
         {
-            let text =
-                String::from_utf8(bytes).map_err(|_| format!("Invalid variant text: {path}"))?;
-            bytes = text
-                .replace(&marker.vehicle_root, &format!("vehicles/{chassis}/"))
-                .into_bytes();
+            std::str::from_utf8(&bytes).map_err(|_| format!("Invalid variant text: {path}"))?;
+            bytes = remap.text(&bytes, &marker.vehicle_root, chassis);
         }
         if result.insert(path, bytes).is_some() {
             return Err("Conflicting mapped BESS variant files".into());
@@ -429,12 +430,7 @@ fn restore_owned_legacy_sounds(
             target.baseline.as_ref().map(|m| {
                 m.sounds
                     .iter()
-                    .map(|s| {
-                        (
-                            mapped_path(&s.path, &m.vehicle_root, target.chassis.as_deref()),
-                            s.rendered_sha256.clone(),
-                        )
-                    })
+                    .map(|s| (target.mapped_path(&s.path), s.rendered_sha256.clone()))
                     .collect()
             })
         });
@@ -463,6 +459,11 @@ fn restore_owned_legacy_sounds(
     }
     let path = pristine.ok_or("The pristine Automation ZIP is required to restore the original sound before importing a selectable BESS variant")?;
     let mut original = archive(&path)?;
+    let original_paths: BTreeMap<_, _> = original
+        .file_names()
+        .filter(|name| name.to_ascii_lowercase().ends_with(".wav"))
+        .map(|name| (target.mapped_path(name), name.to_owned()))
+        .collect();
     let mut restored = BTreeMap::new();
     for (path, expected) in recorded {
         if !path.to_ascii_lowercase().ends_with(".wav")
@@ -476,17 +477,12 @@ fn restore_owned_legacy_sounds(
                 "Legacy BESS sound changed outside this workflow: {path}; original sound was not restored"
             ));
         }
-        let original_path = target
-            .chassis
-            .as_ref()
-            .and_then(|chassis| path.strip_prefix(&format!("vehicles/{chassis}/")))
-            .map_or_else(
-                || path.clone(),
-                |rest| format!("{}{rest}", marker.vehicle_root),
-            );
+        let original_path = original_paths
+            .get(&path)
+            .ok_or_else(|| format!("Pristine source sound is missing for merged path: {path}"))?;
         let mut bytes = Vec::new();
         original
-            .by_name(&original_path)
+            .by_name(original_path)
             .map_err(|_| format!("Pristine source sound is missing: {original_path}"))?
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
@@ -552,7 +548,7 @@ fn plan(mods: &Path, export_path: &Path, marker: &VariantMarker) -> Result<Varia
                 && old.key() == marker.key()
             {
                 let mut source = archive(&path)?;
-                let content = payload(&old, &mut source, chassis)?;
+                let content = payload(&old, &mut source, chassis, &target.remap)?;
                 let files = hashes(&content);
                 // A first merge tags part display names. Accept its exact current
                 // bytes only when the original declared payload, after the same
@@ -603,7 +599,12 @@ fn plan(mods: &Path, export_path: &Path, marker: &VariantMarker) -> Result<Varia
         }
     }
     let mut export = archive(export_path)?;
-    let content = payload(marker, &mut export, target.chassis.as_deref())?;
+    let content = payload(
+        marker,
+        &mut export,
+        target.chassis.as_deref(),
+        &target.remap,
+    )?;
     let previous = state.variants.get(&marker.key());
     if previous.is_some_and(|p| p.exported_at_unix_ms > marker.exported_at_unix_ms) {
         return Err("A newer revision of this BESS variant is already installed".into());
@@ -944,7 +945,9 @@ mod tests {
         revision: u64,
         obsolete: bool,
     ) -> PathBuf {
-        let root = source.file_stem().unwrap().to_str().unwrap();
+        let root = crate::scanner::inspect_vehicle_zip(source)
+            .unwrap()
+            .internal_name;
         let vehicle_root = format!("vehicles/{root}/");
         let mut files = contents(source);
         let pc = format!("{vehicle_root}bess_{profile}.pc");
@@ -1163,6 +1166,117 @@ mod tests {
     }
 
     #[test]
+    fn merge_preserves_non_utf8_members_and_remaps_ascii_paths() {
+        let temp = Temp::new();
+        let source = original(&temp.0, "car");
+        let mut files = contents(&source);
+        let text = b"-- temperature \xb0C\nlocal path = 'vehicles/car/data/'\nreturn {}\n";
+        for name in [
+            "lua/powertrain/camsoEngineThermals.lua",
+            "extra.json",
+            "extra.jbeam",
+            "extra.pc",
+        ] {
+            files.insert(format!("vehicles/car/{name}"), text.to_vec());
+        }
+        files.insert(
+            "vehicles/car/opaque.dds".into(),
+            b"\xffvehicles/car/\x00".to_vec(),
+        );
+        files.insert(
+            "vehicles/car/lua/valid.lua".into(),
+            b"return 'vehicles/car/data/'".to_vec(),
+        );
+        write_zip(&source, &files);
+        let vehicles = crate::scanner::scan_directory(&temp.0);
+        let pack = crate::merger::Merger::merge_variants("Family", &vehicles, &temp.0).unwrap();
+        let merged = contents(&pack);
+        for name in [
+            "lua/powertrain/camsoEngineThermals.lua",
+            "extra.json",
+            "extra.jbeam",
+            "extra.pc",
+        ] {
+            assert_eq!(
+                merged[&format!("vehicles/family/{name}")],
+                b"-- temperature \xb0C\nlocal path = 'vehicles/family/data/'\nreturn {}\n",
+                "changed non-path bytes or emptied {name}"
+            );
+        }
+        assert_eq!(
+            merged["vehicles/family/opaque.dds"],
+            files["vehicles/car/opaque.dds"]
+        );
+        assert_eq!(
+            merged["vehicles/family/lua/valid.lua"],
+            b"return 'vehicles/family/data/'"
+        );
+        crate::merger::Merger::unmerge_chassis("Family", &temp.0).unwrap();
+        assert_eq!(contents(&source), files);
+    }
+
+    #[test]
+    fn merge_separates_conflicting_banks_and_keeps_both_configurations() {
+        let temp = Temp::new();
+        let originals = [original(&temp.0, "alpha"), original(&temp.0, "beta")];
+        let bank = "art/sound/engine/shared";
+        for (path, root, label) in [(&originals[0], "alpha", "A"), (&originals[1], "beta", "B")] {
+            let mut files = contents(path);
+            files.insert(format!("{bank}/different.wav"), label.as_bytes().to_vec());
+            files.insert(format!("{bank}/same.wav"), b"shared data".to_vec());
+            files.insert(
+                "art/sound/blends/shared.sfxBlend2D.json".into(),
+                format!(r#"{{"samples":[["{bank}/different.wav",800],["{bank}/same.wav",900]]}}"#)
+                    .into_bytes(),
+            );
+            files.insert(
+                format!("vehicles/{root}/original.jbeam"),
+                format!(
+                    r#"{{"original_engine":{{"information":{{"name":"Engine {label}"}},
+                    // An apostrophe here shouldn't hide the next string.
+                    "soundConfig":{{"sampleName":"shared"}}}}}}"#
+                )
+                .into_bytes(),
+            );
+            files.insert(
+                format!("vehicles/{root}/info_base.json"),
+                format!(r#"{{"Configuration":"{label}"}}"#).into_bytes(),
+            );
+            write_zip(path, &files);
+        }
+        let original_hashes = originals.each_ref().map(|path| sha256_file(path).unwrap());
+        let inputs = crate::scanner::scan_directory(&temp.0);
+        let pack = crate::merger::Merger::merge_variants("Family", &inputs, &temp.0).unwrap();
+        let merged = contents(&pack);
+        let beta = crate::merger::remap::STATE;
+        let remaps: BTreeMap<String, MergeRemap> = serde_json::from_slice(&merged[beta]).unwrap();
+        let beta = &remaps[&original_hashes[1]];
+        let pc_path = beta.path("vehicles/beta/base.pc", "family");
+        assert_ne!(pc_path, "vehicles/family/base.pc");
+        let pc: serde_json::Value = serde_json::from_slice(&merged[&pc_path]).unwrap();
+        let part = pc["parts"]["engine"].as_str().unwrap();
+        assert_ne!(part, "original_engine");
+        let jbeam_path = beta.path("vehicles/beta/original.jbeam", "family");
+        let jbeam = crate::merger::jbeam::parse(std::str::from_utf8(&merged[&jbeam_path]).unwrap())
+            .unwrap();
+        let sample = jbeam[part]["soundConfig"]["sampleName"].as_str().unwrap();
+        assert_ne!(sample, "shared");
+        let blend = format!("art/sound/blends/{sample}.sfxBlend2D.json");
+        let blend: serde_json::Value = serde_json::from_slice(&merged[&blend]).unwrap();
+        assert_eq!(merged[blend["samples"][0][0].as_str().unwrap()], b"B");
+        assert_eq!(
+            merged[blend["samples"][1][0].as_str().unwrap()],
+            b"shared data"
+        );
+        assert_eq!(merged[&format!("{bank}/different.wav")], b"A");
+        crate::merger::Merger::unmerge_chassis("Family", &temp.0).unwrap();
+        assert_eq!(
+            originals.each_ref().map(|path| sha256_file(path).unwrap()),
+            original_hashes
+        );
+    }
+
+    #[test]
     fn initial_merge_retains_both_configurations_and_multiple_sound_profiles() {
         let temp = Temp::new();
         let source = original(&temp.0, "car");
@@ -1237,7 +1351,12 @@ mod tests {
         let original = sources_for_bess(&temp.0, &pack)
             .unwrap()
             .into_iter()
-            .find(|p| p.file_name().unwrap() == "first.zip")
+            .find(|p| {
+                crate::scanner::inspect_vehicle_zip(p)
+                    .unwrap()
+                    .internal_name
+                    == "first"
+            })
             .unwrap();
         let next = export(&original, &exports, "smooth", 11, false);
         apply_update(&temp.0, &next).unwrap();

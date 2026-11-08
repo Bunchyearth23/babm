@@ -8,6 +8,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
+pub(crate) mod jbeam;
+pub(crate) mod remap;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MergeManifest {
     pub chassis_name: String,
@@ -25,6 +28,24 @@ pub struct OriginalFileBackup {
 }
 
 pub struct Merger;
+
+// Lua files from Automation can contain legacy-encoded comments. Replace
+// ASCII path references without changing their other bytes or losing data.
+fn remap_path_bytes(content: &[u8], old: &str, new: &str) -> Vec<u8> {
+    let mut mapped = Vec::with_capacity(content.len());
+    let mut offset = 0;
+    while let Some(index) = content[offset..]
+        .windows(old.len())
+        .position(|window| window == old.as_bytes())
+    {
+        let start = offset + index;
+        mapped.extend_from_slice(&content[offset..start]);
+        mapped.extend_from_slice(new.as_bytes());
+        offset = start + old.len();
+    }
+    mapped.extend_from_slice(&content[offset..]);
+    mapped
+}
 
 impl Merger {
     /// Merges multiple vehicle variant ZIPs into a single chassis mod ZIP.
@@ -53,8 +74,8 @@ impl Merger {
                     .into(),
             );
         }
-        crate::bess::check_merge_audio(variants, &chassis_slug)?;
-        let variant_state = crate::bess::merge_variant_state(variants, &chassis_slug)?;
+        let (remaps, remaps_by_source) = remap::plan(variants, &chassis_slug)?;
+        let variant_state = crate::bess::merge_variant_state(variants, &remaps, &chassis_slug)?;
         let staged_output = crate::bess::unique_path(mods_dir, ".babm-merge", "tmp");
 
         let backup_dir = mods_dir.join(".babm_backup").join(&chassis_slug);
@@ -65,7 +86,8 @@ impl Merger {
         // 1. Collect and backup original files
         let mut original_backups = Vec::new();
         for v in &all_inputs {
-            let backup_dest = backup_dir.join(&v.file_name);
+            let backup_filename = format!("{}.babm_backup", v.file_name);
+            let backup_dest = backup_dir.join(&backup_filename);
             if backup_dest.exists()
                 && crate::bess::sha256_file(&backup_dest)?
                     != crate::bess::sha256_file(&v.file_path)?
@@ -81,7 +103,7 @@ impl Merger {
             original_backups.push(OriginalFileBackup {
                 original_filename: v.file_name.clone(),
                 original_path: v.file_path.clone(),
-                backup_filename: v.file_name.clone(),
+                backup_filename,
             });
         }
 
@@ -103,7 +125,7 @@ impl Merger {
         let mut first_author = "Bunchy".to_string();
         let mut first_trim_part = None;
 
-        for (variant_idx, v) in variants.iter().enumerate() {
+        for (variant_idx, (v, remap)) in variants.iter().zip(&remaps).enumerate() {
             let zip_file = File::open(&v.file_path)
                 .map_err(|e| format!("Impossible d'ouvrir {}: {e}", v.file_path.display()))?;
             let mut archive = ZipArchive::new(zip_file)
@@ -151,6 +173,7 @@ impl Merger {
                 if original_name == crate::bess::MARKER
                     || original_name == "babm-bess-updates.json"
                     || original_name == "babm-bess-variants.json"
+                    || original_name == remap::STATE
                 {
                     continue;
                 }
@@ -159,25 +182,9 @@ impl Merger {
                     continue;
                 }
 
-                // Determine new path
-                let new_entry_name = if original_name.starts_with(&old_vehicle_prefix) {
-                    let sub = original_name.strip_prefix(&old_vehicle_prefix).unwrap();
-                    format!("{}{}", new_vehicle_prefix, sub)
-                } else if original_name.starts_with("vehicles/") {
-                    // Other vehicle path inside
-                    let mut parts: Vec<&str> = original_name.split('/').collect();
-                    if parts.len() > 2 {
-                        parts[1] = &chassis_slug;
-                        parts.join("/")
-                    } else {
-                        original_name.clone()
-                    }
-                } else {
-                    original_name.clone()
-                };
+                let new_entry_name = remap.path(&original_name, &chassis_slug);
 
                 // Skip special files that we will generate unified versions of
-                let _basename = new_entry_name.rsplit('/').next().unwrap_or("");
                 if new_entry_name == format!("{}info.json", new_vehicle_prefix) {
                     // Extract paints from info.json
                     let mut text = String::new();
@@ -223,43 +230,34 @@ impl Merger {
                 // Check if we need to replace vehicle path references inside text files
                 let is_text_file = new_entry_name.ends_with(".jbeam")
                     || new_entry_name.ends_with(".json")
-                    || new_entry_name.ends_with(".materials.json")
                     || new_entry_name.ends_with(".lua")
-                    || new_entry_name.ends_with(".pc");
+                    || new_entry_name.ends_with(".pc")
+                    || (remap.has_rules() && new_entry_name.ends_with(".dae"));
 
-                if is_text_file && entry.size() < 10_000_000 {
+                if is_text_file && (remap.has_rules() || entry.size() < 10_000_000) {
+                    if entry.size() > 256_000_000 {
+                        return Err(format!("File too large to remap: {original_name}"));
+                    }
                     let mut content = Vec::new();
                     entry.read_to_end(&mut content).map_err(|e| e.to_string())?;
-
-                    if let Ok(text) = String::from_utf8(content) {
-                        // Replace "vehicles/<old>/" with "vehicles/<new>/"
-                        let old_ref = format!("vehicles/{}/", v.internal_name);
-                        let new_ref = format!("vehicles/{}/", chassis_slug);
-                        let mut modified_text = text.replace(&old_ref, &new_ref);
-
-                        // Tag part names in JBeam information blocks with variant and BESS
-                        if new_entry_name.ends_with(".jbeam")
-                            && !new_entry_name.ends_with("camso_core.jbeam")
-                        {
-                            let part_is_bess =
-                                if selectable.is_some() || !selectable_files.is_empty() {
-                                    selectable_files.contains(&original_name)
-                                } else {
-                                    is_bess
-                                };
-                            modified_text =
-                                tag_jbeam_part_names(&modified_text, &trim_name, part_is_bess);
-                        }
-
-                        zip_writer
-                            .start_file(&new_entry_name, options)
-                            .map_err(|e| e.to_string())?;
-                        zip_writer
-                            .write_all(modified_text.as_bytes())
-                            .map_err(|e| e.to_string())?;
-                        written_entries.insert(new_entry_name);
-                        continue;
+                    let mut mapped = remap.text(&content, &old_vehicle_prefix, &chassis_slug);
+                    if new_entry_name.ends_with(".jbeam")
+                        && !new_entry_name.ends_with("camso_core.jbeam")
+                        && let Ok(jbeam) = std::str::from_utf8(&mapped)
+                    {
+                        let part_is_bess = if selectable.is_some() || !selectable_files.is_empty() {
+                            selectable_files.contains(&original_name)
+                        } else {
+                            is_bess
+                        };
+                        mapped = tag_jbeam_part_names(jbeam, &trim_name, part_is_bess).into_bytes();
                     }
+                    zip_writer
+                        .start_file(&new_entry_name, options)
+                        .map_err(|e| e.to_string())?;
+                    zip_writer.write_all(&mapped).map_err(|e| e.to_string())?;
+                    written_entries.insert(new_entry_name);
+                    continue;
                 }
 
                 // Binary or unchanged file: copy directly
@@ -276,6 +274,12 @@ impl Merger {
                 .start_file("babm-bess-variants.json", options)
                 .map_err(|e| e.to_string())?;
             zip_writer.write_all(&state).map_err(|e| e.to_string())?;
+        }
+        if !remaps_by_source.is_empty() {
+            zip_writer
+                .start_file(remap::STATE, options)
+                .map_err(|e| e.to_string())?;
+            serde_json::to_writer(&mut zip_writer, &remaps_by_source).map_err(|e| e.to_string())?;
         }
 
         // 3. Write unified info.json
@@ -457,7 +461,8 @@ impl Merger {
             }
             // Retain the pack and all original snapshots for recovery. No
             // sound/variable changes are discarded by deleting the backup tree.
-            let archived = crate::bess::unique_path(&backup_dir, "before-unmerge", "zip");
+            let archived =
+                crate::bess::unique_path(&backup_dir, "before-unmerge", "zip.babm_backup");
             fs::rename(&merged_zip_path, archived).map_err(|e| e.to_string())?;
             Ok(())
         })();
